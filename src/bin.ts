@@ -45,6 +45,7 @@ program
   .option('--keep-alive', 'Keep CODESYS running after server stops', false)
   .option('--kill-existing-codesys', 'Kill any running CODESYS.exe before launching (dev convenience; off by default)', false)
   .option('--timeout <ms>', 'Default command timeout in ms', '60000')
+  .option('--ready-timeout-ms <ms>', 'Max time (ms) to wait for the watcher to signal ready after launching CODESYS. Bump for heavy distributions like ABB Automation Builder (~180000).', '60000')
   .option('--verbose', 'Enable verbose logging')
   .option('--debug', 'Enable debug logging (more verbose)')
   .option('--detect', 'Detect installed CODESYS versions and exit')
@@ -94,6 +95,7 @@ if (opts.detect) {
     keepAlive: opts.keepAlive || false,
     killExistingCodesys: opts.killExistingCodesys || false,
     timeoutMs: parseInt(opts.timeout, 10) || 60000,
+    readyTimeoutMs: parseInt(opts.readyTimeoutMs, 10) || 60000,
     fallbackHeadless: opts.fallbackHeadless !== false,
     verbose: opts.verbose || false,
     debug: opts.debug || false,

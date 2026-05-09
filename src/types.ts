@@ -36,6 +36,13 @@ export interface LauncherConfig {
    * CODESYS instance the user might be using.
    */
   killExistingCodesys?: boolean;
+  /**
+   * Maximum time to wait (ms) for the watcher to write ready.signal after
+   * spawning CODESYS. Defaults to 60000. Heavyweight CODESYS distributions
+   * (e.g. ABB Automation Builder) can take ~2 minutes to cold-boot the
+   * scripting engine; bump this to 180000+ in those cases.
+   */
+  readyTimeoutMs?: number;
 }
 
 /** Runtime status of the CODESYS launcher */

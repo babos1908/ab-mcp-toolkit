@@ -14,7 +14,7 @@ import { ScriptManager } from './script-manager';
 import { launcherLog } from './logger';
 
 const SESSION_DIR_PREFIX = 'codesys-mcp-persistent';
-const READY_TIMEOUT_MS = 60_000;
+const DEFAULT_READY_TIMEOUT_MS = 60_000;
 const READY_POLL_MS = 500;
 const SHUTDOWN_WAIT_MS = 5_000;
 const HEALTH_CHECK_INTERVAL_MS = 5_000;
@@ -133,13 +133,16 @@ export class CodesysLauncher implements ScriptExecutor {
       this.process = null;
     });
 
-    // Poll for ready.signal
+    // Poll for ready.signal. Bumped past the default for heavy distributions
+    // (ABB Automation Builder needs ~2 minutes for the scripting engine to
+    // come up on cold start) by passing readyTimeoutMs in LauncherConfig.
+    const readyTimeout = this.config.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
     const readyStart = Date.now();
-    while (Date.now() - readyStart < READY_TIMEOUT_MS) {
+    while (Date.now() - readyStart < readyTimeout) {
       if (await this.ipcClient.isReady()) {
         this.setState('ready');
         this.startedAt = Date.now();
-        launcherLog.info('CODESYS watcher is ready');
+        launcherLog.info(`CODESYS watcher is ready (after ${Date.now() - readyStart}ms)`);
         this.startHealthMonitor();
         return;
       }
@@ -147,7 +150,7 @@ export class CodesysLauncher implements ScriptExecutor {
     }
 
     // Timeout — watcher never signaled ready
-    this.lastError = `Watcher did not signal ready within ${READY_TIMEOUT_MS}ms`;
+    this.lastError = `Watcher did not signal ready within ${readyTimeout}ms`;
     this.setState('error');
     throw new Error(this.lastError);
   }
