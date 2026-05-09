@@ -261,6 +261,76 @@ sys.exit(0)
     return this.ipcClient.sendCommand(content, timeoutMs);
   }
 
+  /**
+   * "Attach to existing CODESYS" — step 1. Prepares an IPC session and writes
+   * a watcher.py the user runs themselves from inside an already-running
+   * CODESYS / Automation Builder GUI (Tools → Scripting → Execute Script
+   * File...). Returns the absolute path of the watcher.py.
+   *
+   * Does NOT spawn CODESYS. Pair with completeAttach() once the user has
+   * started the script. The combination is functionally equivalent to
+   * launch() but lets the user own the GUI lifecycle (lock conflicts disappear
+   * because there is only one CODESYS instance, the user's own).
+   */
+  async prepareAttach(): Promise<{ watcherPath: string; sessionId: string }> {
+    if (this.state !== 'stopped' && this.state !== 'error') {
+      throw new Error(`Cannot prepare attach: state is '${this.state}'`);
+    }
+
+    this.setState('launching');
+    this.sessionId = uuidv4();
+    this.ipcDir = path.join(os.tmpdir(), SESSION_DIR_PREFIX, this.sessionId);
+    launcherLog.info(`Attach session ${this.sessionId} — IPC dir: ${this.ipcDir}`);
+
+    this.ipcClient = new IpcClient({
+      baseDir: this.ipcDir,
+      ...DEFAULT_IPC_CONFIG,
+    });
+    await this.ipcClient.ensureDirectories();
+
+    const scriptManager = new ScriptManager();
+    const watcherTemplate = scriptManager.loadTemplate('watcher');
+    const watcherContent = scriptManager.interpolate(watcherTemplate, {
+      IPC_BASE_DIR: this.ipcDir,
+    });
+    const watcherPath = path.join(this.ipcDir, 'watcher.py');
+    fs.writeFileSync(watcherPath, watcherContent, 'utf-8');
+
+    launcherLog.info(`Watcher prepared at ${watcherPath} (waiting for user to run it)`);
+    return { watcherPath, sessionId: this.sessionId };
+  }
+
+  /**
+   * "Attach to existing CODESYS" — step 2. Polls ready.signal until it
+   * appears, then transitions to ready state. Call this AFTER the user has
+   * started the prepared watcher script inside their CODESYS GUI.
+   *
+   * The pid is left null because we did not spawn — health monitoring still
+   * works because the IPC channel will go silent if the user closes CODESYS.
+   */
+  async completeAttach(): Promise<void> {
+    if (this.state !== 'launching' || !this.ipcClient) {
+      throw new Error(`Cannot complete attach: state is '${this.state}'. Call prepareAttach() first.`);
+    }
+
+    const readyTimeout = this.config.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
+    const readyStart = Date.now();
+    while (Date.now() - readyStart < readyTimeout) {
+      if (await this.ipcClient.isReady()) {
+        this.setState('ready');
+        this.startedAt = Date.now();
+        launcherLog.info(`Attached to existing CODESYS watcher (after ${Date.now() - readyStart}ms)`);
+        this.startHealthMonitor();
+        return;
+      }
+      await this.sleep(READY_POLL_MS);
+    }
+
+    this.lastError = `Watcher did not signal ready within ${readyTimeout}ms after attach. Did you run the watcher script in CODESYS Tools → Scripting → Execute Script File...?`;
+    this.setState('error');
+    throw new Error(this.lastError);
+  }
+
   /** Get current launcher status */
   getStatus(): LauncherStatus {
     return {

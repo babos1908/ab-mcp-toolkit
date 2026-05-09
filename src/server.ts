@@ -151,6 +151,54 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
   );
 
   s.tool(
+    'attach_codesys',
+    'Attach to an ALREADY-RUNNING CODESYS / Automation Builder. Two-step flow that puts the user in control of the GUI lifecycle (no auto-spawn, no lock conflicts). Step 1: call without confirm — returns a watcher.py path. The user opens that file in CODESYS via "Tools → Scripting → Execute Script File..." (CODESYS must already be running; open the project there if needed). Step 2: call again with confirm=true — the server polls for the watcher\'s ready signal and switches to persistent mode. Use this instead of launch_codesys when the user wants to drive the GUI themselves.',
+    {
+      confirm: z.boolean().describe('Pass false (or omit) on the first call to prepare the watcher. Pass true on the second call after the user has started the watcher script inside CODESYS.').optional(),
+    },
+    async (args: { confirm?: boolean }) => {
+      if (!launcher) {
+        return {
+          content: [{ type: 'text' as const, text: 'Persistent mode not configured. Start the server with --mode persistent.' }],
+          isError: true,
+        };
+      }
+      const confirm = args.confirm === true;
+      try {
+        if (!confirm) {
+          const { watcherPath, sessionId } = await launcher.prepareAttach();
+          const text = [
+            'Watcher prepared. The MCP server is NOT spawning CODESYS — please do these two things in your already-running CODESYS / Automation Builder GUI:',
+            '',
+            '  1. (Optional) Open the project you want to work on.',
+            `  2. Tools → Scripting → Execute Script File... → select:\n     ${watcherPath}`,
+            '',
+            'Then call attach_codesys again with confirm=true. The server will poll the IPC channel until the watcher signals ready (timeout follows --ready-timeout-ms).',
+            '',
+            `Session: ${sessionId}`,
+          ].join('\n');
+          return { content: [{ type: 'text' as const, text }], isError: false };
+        }
+
+        // confirm=true → finalise attach: poll ready.signal, swap executor.
+        await launcher.completeAttach();
+        executor.swapNow(launcher);
+        executionMode = 'persistent';
+        return {
+          content: [{ type: 'text' as const, text: 'Attached. Persistent mode active — subsequent tool calls run inside the user\'s CODESYS GUI session.' }],
+          isError: false,
+        };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: 'text' as const, text: `attach_codesys failed: ${msg}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  s.tool(
     'shutdown_codesys',
     'Shut down the persistent CODESYS instance.',
     async () => {
