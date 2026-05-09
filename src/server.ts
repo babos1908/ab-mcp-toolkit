@@ -347,8 +347,16 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       type: z.enum(['Program', 'FunctionBlock', 'Function']).describe("Type of POU."),
       language: z.enum(['ST', 'LD', 'FBD', 'SFC', 'IL', 'CFC']).describe("Implementation language."),
       parentPath: z.string().min(1).describe("Relative path under project root or application (e.g., 'Application')."),
+      returnType: z.string().describe("Return type for Function POUs (e.g., 'BOOL', 'STRING', 'INT', 'REAL'). Required when type is 'Function'; ignored for 'Program' and 'FunctionBlock'.").optional(),
     },
-    async (args: { projectFilePath: string; name: string; type: 'Program' | 'FunctionBlock' | 'Function'; language: 'ST' | 'LD' | 'FBD' | 'SFC' | 'IL' | 'CFC'; parentPath: string }) => {
+    async (args: { projectFilePath: string; name: string; type: 'Program' | 'FunctionBlock' | 'Function'; language: 'ST' | 'LD' | 'FBD' | 'SFC' | 'IL' | 'CFC'; parentPath: string; returnType?: string }) => {
+      // Function POUs require a return_type per CODESYS scripting API.
+      if (args.type === 'Function' && (!args.returnType || !args.returnType.trim())) {
+        return {
+          content: [{ type: 'text' as const, text: `Error: Function POUs require a 'returnType' parameter (e.g. 'BOOL', 'STRING', 'INT'). Pass returnType when type is 'Function'.` }],
+          isError: true,
+        };
+      }
       const escProjPath = resolvePath(args.projectFilePath, workspaceDir);
       const sanParentPath = sanitizePouPath(args.parentPath);
       const script = scriptManager.prepareScriptWithHelpers(
@@ -359,6 +367,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
           POU_TYPE_STR: args.type,
           IMPL_LANGUAGE_STR: args.language,
           PARENT_PATH: sanParentPath,
+          RETURN_TYPE: (args.returnType ?? '').trim(),
         },
         ['_text_utils', 'ensure_project_open', 'find_object_by_path']
       );

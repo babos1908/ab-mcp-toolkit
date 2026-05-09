@@ -86,7 +86,9 @@ if (opts.detect) {
     });
   });
 } else {
-  // Build server config
+  // Build server config. The --timeout flag is the per-command IPC timeout
+  // and is wired through to IpcClient.commandTimeoutMs (defaulted to 60s).
+  const cmdTimeoutMs = parseInt(opts.timeout, 10) || 60000;
   const config: ServerConfig = {
     codesysPath: opts.codesysPath.trim(),
     profileName: opts.codesysProfile.trim(),
@@ -94,7 +96,8 @@ if (opts.detect) {
     autoLaunch: opts.autoLaunch !== false,
     keepAlive: opts.keepAlive || false,
     killExistingCodesys: opts.killExistingCodesys || false,
-    timeoutMs: parseInt(opts.timeout, 10) || 60000,
+    timeoutMs: cmdTimeoutMs,
+    commandTimeoutMs: cmdTimeoutMs,
     readyTimeoutMs: parseInt(opts.readyTimeoutMs, 10) || 60000,
     fallbackHeadless: opts.fallbackHeadless !== false,
     verbose: opts.verbose || false,

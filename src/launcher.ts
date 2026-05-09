@@ -78,10 +78,13 @@ export class CodesysLauncher implements ScriptExecutor {
 
     launcherLog.info(`Session ${this.sessionId} — IPC dir: ${this.ipcDir}`);
 
-    // Create IPC client and directories
+    // Create IPC client and directories. commandTimeoutMs from LauncherConfig
+    // overrides the default so heavy operations (cold project open, large
+    // compiles on Automation Builder, etc.) are not killed by the 60s default.
     this.ipcClient = new IpcClient({
       baseDir: this.ipcDir,
       ...DEFAULT_IPC_CONFIG,
+      ...(this.config.commandTimeoutMs ? { commandTimeoutMs: this.config.commandTimeoutMs } : {}),
     });
     await this.ipcClient.ensureDirectories();
 

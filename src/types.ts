@@ -43,6 +43,13 @@ export interface LauncherConfig {
    * scripting engine; bump this to 180000+ in those cases.
    */
   readyTimeoutMs?: number;
+  /**
+   * Per-command IPC timeout (ms) — how long the server waits for the watcher
+   * to return a result before giving up. Defaults to 60000. First-time
+   * project opens / large compiles on heavyweight distributions can exceed
+   * this; bump to 300000+ to match the slowest expected operation.
+   */
+  commandTimeoutMs?: number;
 }
 
 /** Runtime status of the CODESYS launcher */

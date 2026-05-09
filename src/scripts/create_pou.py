@@ -4,6 +4,7 @@ POU_NAME = "{POU_NAME}"
 POU_TYPE_STR = "{POU_TYPE_STR}"
 IMPL_LANGUAGE_STR = "{IMPL_LANGUAGE_STR}"
 PARENT_PATH_REL = "{PARENT_PATH}"
+RETURN_TYPE = "{RETURN_TYPE}"  # Required for Function POUs (e.g. "BOOL", "STRING"); ignored for Program/FunctionBlock
 
 pou_type_map = {
     "Program": script_engine.PouType.Program,
@@ -84,14 +85,26 @@ try:
     print("DEBUG: Setting language to None (will use default).")
     # Example if mapping language string: lang_guid = lang_map.get(IMPL_LANGUAGE_STR, None)
 
-    print("DEBUG: Calling parent_object.create_pou: Name='%s', Type=%s, Lang=%s" % (POU_NAME, pou_type_enum, lang_guid))
+    print("DEBUG: Calling parent_object.create_pou: Name='%s', Type=%s, Lang=%s, ReturnType='%s'" % (POU_NAME, pou_type_enum, lang_guid, RETURN_TYPE))
 
-    # Call create_pou using keyword arguments
-    new_pou = parent_object.create_pou(
-        name=POU_NAME,
-        type=pou_type_enum,
-        language=lang_guid # Pass None
-    )
+    # Function POUs require a return_type kwarg per CODESYS scripting API;
+    # Program/FunctionBlock create_pou does not accept it. Branch accordingly.
+    if pou_type_enum == script_engine.PouType.Function:
+        actual_return_type = RETURN_TYPE if RETURN_TYPE else None
+        if actual_return_type is None:
+            raise ValueError("Function POU '%s' requires a return_type. Provide the 'returnType' tool parameter (e.g. 'BOOL', 'STRING', 'INT')." % POU_NAME)
+        new_pou = parent_object.create_pou(
+            name=POU_NAME,
+            type=pou_type_enum,
+            language=lang_guid, # Pass None to use default
+            return_type=actual_return_type
+        )
+    else:
+        new_pou = parent_object.create_pou(
+            name=POU_NAME,
+            type=pou_type_enum,
+            language=lang_guid # Pass None
+        )
 
     print("DEBUG: parent_object.create_pou returned: %s" % new_pou)
     if new_pou:
