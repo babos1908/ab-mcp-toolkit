@@ -75,16 +75,21 @@ Prefisso: `mcp__codesys-persistent__`. Categorie:
 
 ## Patch nel fork (rispetto a luke-harriman upstream)
 
-Branch `main` contiene 4 commit di differenza, tutti su `feat/configurable-ready-timeout`:
+Branch `main` contiene **5 patch indipendenti**:
 
-1. **`--ready-timeout-ms` configurabile** — default era 60s hardcoded. AB 2.9 cold-boot impiega ~120s; senza patch il launcher dava timeout prematuro.
-2. **`attach_codesys` tool** — modalità per Premium edition (utente lancia AB e fa "Tools → Scripting → Execute Script File…"). Non utilizzabile su Standard ma incluso per completezza.
-3. **`create_pou Function returnType`** — fix bug: il template non passava `return_type` allo scripting API, ogni Function POU falliva con `ValueError`.
-4. **`--timeout` wirato a IpcClient** — il flag esisteva ma era ignorato; ora regola il timeout per-comando IPC (default 60s troppo stretto per cold open di project pesanti).
+1. **`--ready-timeout-ms` configurabile** — default era 60s hardcoded. AB 2.9 cold-boot impiega ~120s; senza patch il launcher dava timeout prematuro. (branch `feat/configurable-ready-timeout`)
+2. **`attach_codesys` tool** — modalità per Premium edition (utente lancia AB e fa "Tools → Scripting → Execute Script File…"). Non utilizzabile su Standard ma incluso per completezza. (`feat/configurable-ready-timeout`)
+3. **`create_pou Function returnType`** — fix bug: il template non passava `return_type` allo scripting API, ogni Function POU falliva con `ValueError`. (`feat/configurable-ready-timeout`)
+4. **`--timeout` wirato a IpcClient** — il flag esisteva ma era ignorato; ora regola il timeout per-comando IPC (default 60s troppo stretto per cold open di project pesanti). (`feat/configurable-ready-timeout`)
+5. **`compile_project` reale via `generate_code()`** — fix critico: il vecchio script ritornava sempre `0 error(s), 0 warning(s)` anche su progetti con decine di errori `C0046 Identifier not defined` visibili nella UI. Quattro cause: `build()` vs `generate_code()`, cache messages stale (no `clear_messages`), `Guid(...)` non importato (è `script_engine.Guid`), no filtro categoria+severity sui messaggi. Verifica empirica: warning "connection not encrypted" e error "Identifier not defined" ora vengono catturati correttamente. (branch `fix/compile-project-generate-code-and-categories`)
 
-PR upstream: **non ancora inviata** (decisione utente). Branch `feat/configurable-ready-timeout` resta separato per facilitarla quando serve:
+PR upstream: **non ancora inviata** (decisione utente). I due branch restano separati per facilitare PR clean:
 ```powershell
+# PR 1 — il bundle ready-timeout / attach / create_pou / --timeout
 gh pr create --repo luke-harriman/Codesys-MCP --base main --head babos1908:feat/configurable-ready-timeout
+
+# PR 2 — il fix compile_project (indipendente, alto valore per la community)
+gh pr create --repo luke-harriman/Codesys-MCP --base main --head babos1908:fix/compile-project-generate-code-and-categories
 ```
 
 ## Troubleshooting
