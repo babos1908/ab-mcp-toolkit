@@ -15,8 +15,8 @@ Setup e workflow di **`ab-mcp-toolkit`**, MCP server che permette a Claude Code 
 
 ```powershell
 # 1. Clone fork (main include già tutti i patch)
-git clone https://github.com/babos1908/ab-mcp-toolkit.git C:\Users\Admin\Documents\GitHub\ab-mcp-toolkit
-cd C:\Users\Admin\Documents\GitHub\ab-mcp-toolkit
+git clone https://github.com/babos1908/ab-mcp-toolkit.git $env:USERPROFILE\Documents\GitHub\ab-mcp-toolkit
+cd $env:USERPROFILE\Documents\GitHub\ab-mcp-toolkit
 
 # 2. Install + build + link globale
 npm install
@@ -32,9 +32,11 @@ claude mcp add -s user codesys-persistent -- codesys-mcp-persistent `
   --ready-timeout-ms 600000 `
   --timeout 600000
 
-# 4. Skill Claude Code (workflow knowledge)
-# Copia il file ~/.claude/skills/codesys-ab/SKILL.md dalla macchina primaria,
-# oppure recuperalo dal repo team se viene pubblicato.
+# 4. Skill Claude Code (workflow knowledge) — installata automaticamente da
+#    setup-codesys-mcp.ps1 nel passo 1. Source: skills/codesys-ab/SKILL.md
+#    nel repo (versione pubblica, pattern generici ABB/CODESYS).
+#    Se vuoi pattern privati del tuo progetto, aggiungili a coda nel file
+#    locale ~/.claude/skills/codesys-ab/SKILL.md (NON sovrascritto).
 
 # 5. Verifica
 claude mcp list   # deve mostrare "codesys-persistent: ✓ Connected"
@@ -109,10 +111,11 @@ gh pr create --repo luke-harriman/Codesys-MCP --base main --head babos1908:fix/c
 | Cosa | Dove |
 |---|---|
 | Fork sorgente | https://github.com/babos1908/ab-mcp-toolkit |
-| Clone locale | `C:\Users\Admin\Documents\GitHub\ab-mcp-toolkit` |
+| Clone locale | `%USERPROFILE%\Documents\GitHub\ab-mcp-toolkit` |
 | Build artifacts | `<clone>\dist\` (rigenerato da `npm run build`) |
-| Skill workflow | `C:\Users\Admin\.claude\skills\codesys-ab\SKILL.md` |
-| MCP config | `C:\Users\Admin\.claude.json` (entry `codesys-persistent`) |
+| Skill workflow (source) | `<repo>\skills\codesys-ab\SKILL.md` (versionata, pubblica) |
+| Skill workflow (installata) | `~/.claude/skills/codesys-ab/SKILL.md` (copiata da setup script, può contenere estensioni private) |
+| MCP config | `%USERPROFILE%\.claude.json` (entry `codesys-persistent`) |
 | Watcher logs runtime | `%TEMP%\codesys-mcp-persistent\<sessionId>\watcher.log` |
 | Scripting docs CODESYS | https://content.helpme-codesys.com/en/CODESYS%20Scripting/ |
 
@@ -131,9 +134,9 @@ gh pr create --repo luke-harriman/Codesys-MCP --base main --head babos1908:fix/c
 
 ## Replicare il setup su un nuovo dev/PC del team
 
-1. Esegui i 5 step di "Setup nuova macchina" sopra
-2. Copia anche `~/.claude/skills/codesys-ab/SKILL.md` (oppure se in futuro pubblichiamo skills su un repo team, clone quello)
-3. Verifica con un prompt tipo "apri Test.project e leggi i POU"
+1. Esegui i step di "Setup nuova macchina" sopra (lo script `setup-codesys-mcp.ps1` installa anche la skill `codesys-ab` da `skills/codesys-ab/SKILL.md`).
+2. Verifica con un prompt tipo "apri Test.project e leggi i POU" → la prima risposta deve iniziare con `📡 codesys-ab skill attiva — workflow AB 2.9.`
+3. Se il tuo progetto ha pattern privati (struct, GVL, naming convention specifiche), aggiungili a coda nel file installato `~/.claude/skills/codesys-ab/SKILL.md` — il setup script non sovrascrive il file se già presente.
 
 ## Storia / contesto
 

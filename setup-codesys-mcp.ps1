@@ -129,7 +129,28 @@ claude mcp add -s user $McpName -- codesys-mcp-persistent `
 
 if ($LASTEXITCODE -ne 0) { Fail 'claude mcp add failed.' }
 
-# ── 5. Verify ─────────────────────────────────────────────────────────────────
+# ── 5. Install Claude Code skill (no-overwrite) ───────────────────────────────
+
+Write-Step 'Installing Claude Code skill (codesys-ab)...'
+
+$skillSrc    = Join-Path $repoRoot 'skills\codesys-ab\SKILL.md'
+$skillDstDir = Join-Path $env:USERPROFILE '.claude\skills\codesys-ab'
+$skillDst    = Join-Path $skillDstDir 'SKILL.md'
+
+if (-not (Test-Path $skillSrc)) {
+    Write-Host "WARN: source skill not found at $skillSrc - skipping." -ForegroundColor Yellow
+} elseif (Test-Path $skillDst) {
+    Write-Host "Skill already present at $skillDst - NOT overwriting." -ForegroundColor Yellow
+    Write-Host "      The local file may contain project-specific extensions you want to keep."
+    Write-Host "      To pull the latest public version manually, diff:"
+    Write-Host "        Compare-Object (Get-Content '$skillDst') (Get-Content '$skillSrc')"
+} else {
+    New-Item -ItemType Directory -Path $skillDstDir -Force | Out-Null
+    Copy-Item -Path $skillSrc -Destination $skillDst -Force
+    Write-Host "Installed: $skillDst" -ForegroundColor Green
+}
+
+# ── 6. Verify ─────────────────────────────────────────────────────────────────
 
 Write-Step 'Verifying...'
 claude mcp list | Select-String $McpName
@@ -138,7 +159,9 @@ Write-Host ""
 Write-Host "Setup complete." -ForegroundColor Green
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Yellow
-Write-Host "  - Copy the skill: ~/.claude/skills/codesys-ab/SKILL.md (from the primary dev machine, or wait for a future team-skill repo)."
 Write-Host "  - Open Claude Code in a project folder, mention 'automation builder' / 'codesys' / 'POU' and the skill will trigger."
-Write-Host "  - The first tool call invoking AB will spawn it visibly (cold-start ~2 min, warm <30s)."
+Write-Host "  - First tool call invoking AB will spawn it visibly (cold-start ~2 min, warm <30s)."
+Write-Host "  - To add project-specific patterns (private structs/GVLs/conventions), append a"
+Write-Host "    '## Project-specific patterns' section to the installed skill file. It will not be"
+Write-Host "    overwritten on subsequent setup runs."
 Write-Host ""
