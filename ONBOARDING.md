@@ -1,6 +1,6 @@
-# Onboarding — codesys-persistent MCP per ABB Automation Builder 2.9
+# Onboarding — `ab-mcp-toolkit` (ABB Automation Builder MCP)
 
-Setup e workflow del MCP server che permette a Claude Code (Anthropic) di pilotare ABB Automation Builder 2.9 / CODESYS V3.5 SP19. Fork con patch di [`luke-harriman/Codesys-MCP`](https://github.com/luke-harriman/Codesys-MCP).
+Setup e workflow di **`ab-mcp-toolkit`**, MCP server che permette a Claude Code (Anthropic) di pilotare ABB Automation Builder 2.9 / CODESYS V3.5 SP19. Fork con patch ABB-specific di [`luke-harriman/Codesys-MCP`](https://github.com/luke-harriman/Codesys-MCP) (binary upstream: `codesys-mcp-persistent`, mantenuto invariato per facilità di sync futuro).
 
 ## TL;DR
 
@@ -15,8 +15,8 @@ Setup e workflow del MCP server che permette a Claude Code (Anthropic) di pilota
 
 ```powershell
 # 1. Clone fork (main include già tutti i patch)
-git clone https://github.com/babos1908/Codesys-MCP.git C:\Users\Admin\Documents\GitHub\Codesys-MCP
-cd C:\Users\Admin\Documents\GitHub\Codesys-MCP
+git clone https://github.com/babos1908/ab-mcp-toolkit.git C:\Users\Admin\Documents\GitHub\ab-mcp-toolkit
+cd C:\Users\Admin\Documents\GitHub\ab-mcp-toolkit
 
 # 2. Install + build + link globale
 npm install
@@ -108,8 +108,8 @@ gh pr create --repo luke-harriman/Codesys-MCP --base main --head babos1908:fix/c
 
 | Cosa | Dove |
 |---|---|
-| Fork sorgente | https://github.com/babos1908/Codesys-MCP |
-| Clone locale | `C:\Users\Admin\Documents\GitHub\Codesys-MCP` |
+| Fork sorgente | https://github.com/babos1908/ab-mcp-toolkit |
+| Clone locale | `C:\Users\Admin\Documents\GitHub\ab-mcp-toolkit` |
 | Build artifacts | `<clone>\dist\` (rigenerato da `npm run build`) |
 | Skill workflow | `C:\Users\Admin\.claude\skills\codesys-ab\SKILL.md` |
 | MCP config | `C:\Users\Admin\.claude.json` (entry `codesys-persistent`) |
