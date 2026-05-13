@@ -520,7 +520,12 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       if (!success) {
         message = `Failed initiating compilation for ${args.projectFilePath}. Output:\n${result.output}`;
       } else if (compileMessages.length > 0) {
-        const errors = compileMessages.filter((m) => m.severity === 'error');
+        // Treat 'fatal' as an error too. The Python script emits 'fatal'
+        // for Severity.FatalError; without this filter, fatals are
+        // silently dropped from the formatted output.
+        const errors = compileMessages.filter(
+          (m) => m.severity === 'error' || m.severity === 'fatal'
+        );
         const warnings = compileMessages.filter((m) => m.severity === 'warning');
         const formatMsg = (m: { severity: string; text: string; object?: string; line?: number }) => {
           const loc = m.object ? (m.line != null ? ` [${m.object}:${m.line}]` : ` [${m.object}]`) : '';
@@ -546,6 +551,23 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
           message += ' WARNING: Build command reported errors. Use get_compile_messages for details.';
           isError = true;
         }
+      }
+
+      // Surface the Python script's DEBUG / WARN lines so the caller can
+      // see which categories were scanned, what severity histogram each
+      // produced, and why a given error was or was not caught. Without
+      // this, those print() lines were swallowed by the success path. The
+      // full trace is also mirrored to %TEMP%/codesys-mcp-compile-debug.txt
+      // by the Python script for post-mortem inspection.
+      try {
+        const debugLines = result.output
+          .split(/\r?\n/)
+          .filter((line) => /^(DEBUG:|WARN:)/.test(line));
+        if (debugLines.length > 0) {
+          message += '\n\n[script diagnostics]:\n' + debugLines.join('\n');
+        }
+      } catch {
+        // best-effort surfacing; ignore failures
       }
 
       return { content: [{ type: 'text' as const, text: message }], isError };

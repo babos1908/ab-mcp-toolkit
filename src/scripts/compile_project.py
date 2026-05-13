@@ -1,4 +1,15 @@
 import sys, scriptengine as script_engine, os, traceback, json
+import tempfile
+try:
+    import StringIO  # IronPython 2.7 / Python 2
+except ImportError:
+    try:
+        from io import StringIO as _IOStringIO
+        class StringIO(object):  # shim that quacks like StringIO.StringIO
+            class StringIO(_IOStringIO):
+                pass
+    except Exception:
+        StringIO = None
 
 # Build / code-check message category GUIDs (CODESYS V3 internal).
 # These are the categories that contain the actual compile-time errors /
@@ -7,11 +18,63 @@ import sys, scriptengine as script_engine, os, traceback, json
 # - 'Build'                  : 97F48D64-A2A3-4856-B640-75C046E37EA9
 # - 'Additional code checks' : 220493A1-F49B-4416-9A3F-A545DB707CBE
 # - 'Precompile'             : 217BC73E-759B-4A3C-BFA1-991C938A6541
+#
+# These are kept only as a fallback when system.get_message_categories()
+# enumeration fails. The script now scans every category the runtime
+# exposes (see "Discover all message categories dynamically" below).
 COMPILE_CATEGORY_GUIDS = [
     '97F48D64-A2A3-4856-B640-75C046E37EA9',  # Build
     '220493A1-F49B-4416-9A3F-A545DB707CBE',  # Additional code checks
     '217BC73E-759B-4A3C-BFA1-991C938A6541',  # Precompile
 ]
+
+# --- Stable post-mortem debug file ---
+# Mirror every print() this script emits to a file at a deterministic
+# location. The Node-side server.ts handler can swallow result.output in
+# certain success branches, leaving callers unable to see the DEBUG/WARN
+# diagnostics that the script generates. With this mirror, the full
+# diagnostic trace is always retrievable via:
+#   %TEMP%\codesys-mcp-compile-debug.txt
+# Overwritten on every compile_project call -- treat as "last run only".
+_COMPILE_DEBUG_PATH = os.path.join(tempfile.gettempdir(), 'codesys-mcp-compile-debug.txt')
+_ORIG_STDOUT = sys.stdout
+_DEBUG_BUFFER = StringIO.StringIO() if StringIO is not None else None
+
+class _Tee(object):
+    """Write to multiple sinks. Tolerant of any sink raising on write."""
+    def __init__(self, *sinks):
+        self._sinks = sinks
+    def write(self, data):
+        for s in self._sinks:
+            try:
+                s.write(data)
+            except Exception:
+                pass
+    def flush(self):
+        for s in self._sinks:
+            try:
+                if hasattr(s, 'flush'):
+                    s.flush()
+            except Exception:
+                pass
+
+if _DEBUG_BUFFER is not None:
+    sys.stdout = _Tee(_ORIG_STDOUT, _DEBUG_BUFFER)
+
+def _flush_debug_to_file():
+    """Write the captured stdout to the debug file. Best effort."""
+    if _DEBUG_BUFFER is None:
+        return
+    try:
+        content = _DEBUG_BUFFER.getvalue()
+        if isinstance(content, unicode):
+            content_bytes = content.encode('utf-8')
+        else:
+            content_bytes = content
+        with open(_COMPILE_DEBUG_PATH, 'wb') as f:
+            f.write(content_bytes)
+    except Exception:
+        pass
 
 try:
     print("DEBUG: compile_project script: Project='%s'" % PROJECT_FILE_PATH)
@@ -249,10 +312,15 @@ try:
     print("In Project: %s" % project_name)
     print("Message Count: %d" % len(messages))
     print("SCRIPT_SUCCESS: Application compilation initiated.")
+    print("DEBUG: post-mortem debug trace at %s" % _COMPILE_DEBUG_PATH)
+    _flush_debug_to_file()
+    sys.stdout = _ORIG_STDOUT
     sys.exit(0)
 except Exception as e:
     detailed_error = traceback.format_exc()
     error_message = "Error initiating compilation for project %s: %s\n%s" % (PROJECT_FILE_PATH, e, detailed_error)
     print(error_message)
     print("SCRIPT_ERROR: %s" % error_message)
+    _flush_debug_to_file()
+    sys.stdout = _ORIG_STDOUT
     sys.exit(1)
