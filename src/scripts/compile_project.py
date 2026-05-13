@@ -131,9 +131,13 @@ try:
     # NOTE: Guid is the .NET type exposed as script_engine.Guid, not a Python
     # builtin -- using bare Guid("{...}") raises NameError silently.
     all_categories = []
+    enum_used = "unknown"
     try:
-        cats = script_engine.system.get_message_categories()
+        cats = script_engine.system.get_message_categories() if hasattr(
+            script_engine.system, 'get_message_categories'
+        ) else None
         if cats is not None:
+            enum_used = "dynamic"
             for cat in cats:
                 cat_guid = None
                 cat_name = None
@@ -163,6 +167,7 @@ try:
 
     if not all_categories:
         print("DEBUG: Dynamic enumeration empty -- falling back to hardcoded compile categories.")
+        enum_used = "fallback"
         for guid_str in COMPILE_CATEGORY_GUIDS:
             try:
                 cat_guid = script_engine.Guid('{%s}' % guid_str)
@@ -174,7 +179,10 @@ try:
             except Exception as fallback_err:
                 print("WARN: hardcoded fallback for %s failed: %s" % (guid_str, fallback_err))
 
-    print("DEBUG: %d message categories will be scanned" % len(all_categories))
+    print("DEBUG: %d message categories will be scanned (source: %s)"
+          % (len(all_categories), enum_used))
+    for idx, (cg, cn) in enumerate(all_categories):
+        print("DEBUG:   [%d] %s   (guid=%s)" % (idx, cn, cg))
 
     # --- Clear cached messages in every discovered category ---
     # Without this, get_message_objects() returns stale entries from prior
@@ -186,12 +194,29 @@ try:
             print("WARN: clear_messages('%s') failed: %s" % (cat_name, clr_err))
 
     # --- Trigger build ---
+    # Force a full rebuild by invalidating any precompile cache. Bigger
+    # projects ship a `<name>.precompilecache` file; when valid, the runtime
+    # may skip the semantic check entirely and emit zero errors for code
+    # the UI would flag. clean()/clean_all() are the documented hooks.
+    if hasattr(target_app, 'clean'):
+        try:
+            target_app.clean()
+            print("DEBUG: target_app.clean() executed for '%s'." % app_name)
+        except Exception as clean_err:
+            print("WARN: target_app.clean() raised: %s" % clean_err)
+    if hasattr(target_app, 'clean_all'):
+        try:
+            target_app.clean_all()
+            print("DEBUG: target_app.clean_all() executed for '%s'." % app_name)
+        except Exception as clean_err:
+            print("WARN: target_app.clean_all() raised: %s" % clean_err)
+
     # Call BOTH build() and generate_code(): on bigger projects (libraries,
     # multi-POU device trees), generate_code() alone can skip the semantic
-    # check and silently report 0 errors while the UI shows C0046. build() is
-    # the F11 equivalent and forces the full semantic analyzer. We run build()
-    # first then generate_code() for redundancy; clear_messages() above
-    # ensures we still get a clean message store.
+    # check and silently report 0 errors while the UI shows C0046. build()
+    # is the F11 equivalent and forces the full semantic analyzer. We run
+    # build() first then generate_code() for redundancy; clear_messages()
+    # plus clean() above keep the message store fresh.
     build_invoked = False
     if hasattr(target_app, 'build'):
         try:
@@ -245,52 +270,95 @@ try:
     # Severities worth reporting. Info/text are noise (Build started, etc.).
     KEEP_SEVS = ('fatal', 'error', 'warning')
 
-    # Iterate the dynamic category list built earlier. Print a per-category
-    # severity histogram to stdout so the watcher.log captures it for
-    # post-mortem if we miss something on bigger projects.
+    # Helper to extract message fields uniformly.
+    def _build_entry(msg, cat_name_override=None, sev_str_override=None):
+        sev_str = sev_str_override or _sev_to_string(getattr(msg, 'severity', None))
+        entry = {
+            'category': cat_name_override or 'unknown',
+            'severity': sev_str,
+            'text': getattr(msg, 'text', getattr(msg, 'message', str(msg))),
+        }
+        if hasattr(msg, 'prefix') and hasattr(msg, 'number'):
+            try:
+                entry['code'] = "%s%s" % (msg.prefix, msg.number)
+            except Exception:
+                pass
+        if hasattr(msg, 'object_name'):
+            entry['object'] = msg.object_name
+        elif hasattr(msg, 'source'):
+            entry['object'] = str(msg.source)
+        if hasattr(msg, 'line_number'):
+            entry['line'] = msg.line_number
+        elif hasattr(msg, 'position'):
+            entry['line'] = msg.position
+        return entry
+
+    # Iterate the dynamic category list. Print a per-category severity
+    # histogram unconditionally for diagnostic purposes (even when empty)
+    # so the watcher.log captures the full state.
+    seen_keys = set()
     for cat_guid, cat_name in all_categories:
         try:
             cat_msgs = script_engine.system.get_message_objects(cat_guid)
             if cat_msgs is None:
+                print("DEBUG: category '%s': get_message_objects returned None" % cat_name)
                 continue
-
-            # Diagnostic histogram (visible in watcher.log per session).
             counts = {}
             collected_in_cat = 0
             for msg in cat_msgs:
-                sev_str = _sev_to_string(getattr(msg, 'severity', None))
+                sev_raw = getattr(msg, 'severity', None)
+                sev_str = _sev_to_string(sev_raw)
                 counts[sev_str] = counts.get(sev_str, 0) + 1
                 if sev_str not in KEEP_SEVS:
                     continue
                 collected_in_cat += 1
-                entry = {
-                    'category': cat_name,
-                    'severity': sev_str,
-                    'text': getattr(msg, 'text', getattr(msg, 'message', str(msg))),
-                }
-                # Stable error code like "C0046" when available.
-                if hasattr(msg, 'prefix') and hasattr(msg, 'number'):
-                    try:
-                        entry['code'] = "%s%s" % (msg.prefix, msg.number)
-                    except Exception:
-                        pass
-                # Object/POU where the error occurred.
-                if hasattr(msg, 'object_name'):
-                    entry['object'] = msg.object_name
-                elif hasattr(msg, 'source'):
-                    entry['object'] = str(msg.source)
-                # Line number.
-                if hasattr(msg, 'line_number'):
-                    entry['line'] = msg.line_number
-                elif hasattr(msg, 'position'):
-                    entry['line'] = msg.position
+                entry = _build_entry(msg, cat_name_override=cat_name)
+                key = (entry.get('category'), entry.get('text'), entry.get('object'), entry.get('line'))
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
                 messages.append(entry)
-            if counts:
-                print("DEBUG: category '%s' (%d msgs total, %d kept): %s"
-                      % (cat_name, sum(counts.values()), collected_in_cat, counts))
+            print("DEBUG: category '%s' (%d msgs total, %d kept): %s"
+                  % (cat_name, sum(counts.values()), collected_in_cat, counts))
         except Exception as cat_err:
             print("WARN: failed to collect messages for category '%s': %s"
                   % (cat_name, cat_err))
+
+    # Defensive: ALSO query without a category filter. This catches messages
+    # emitted into categories that get_message_categories() did not return
+    # (newly-created categories, or categories owned by plugins not loaded
+    # at enumeration time).
+    try:
+        if hasattr(script_engine.system, 'get_message_objects'):
+            global_msgs = script_engine.system.get_message_objects()
+            if global_msgs is not None:
+                global_counts = {}
+                added_from_global = 0
+                for msg in global_msgs:
+                    sev_raw = getattr(msg, 'severity', None)
+                    sev_str = _sev_to_string(sev_raw)
+                    global_counts[sev_str] = global_counts.get(sev_str, 0) + 1
+                    if sev_str not in KEEP_SEVS:
+                        continue
+                    entry = _build_entry(msg, cat_name_override='(global)')
+                    key = (None, entry.get('text'), entry.get('object'), entry.get('line'))
+                    # Don't double-count messages already captured per-category.
+                    # Match on (text, object, line) ignoring category.
+                    alt_key_cat = lambda kc: (kc, entry.get('text'), entry.get('object'), entry.get('line'))
+                    if any(alt_key_cat(c) in seen_keys for c in (entry.get('category'), 'unknown')):
+                        # already covered (matched on (cat, text, obj, line)); leave it
+                        # but the seen_keys is per-cat so global one with category=(global)
+                        # might still slip in. Use a separate global de-dup:
+                        pass
+                    if key in seen_keys:
+                        continue
+                    seen_keys.add(key)
+                    messages.append(entry)
+                    added_from_global += 1
+                print("DEBUG: GLOBAL get_message_objects() (no category filter): %d msgs total, %d added from global path: %s"
+                      % (sum(global_counts.values()), added_from_global, global_counts))
+    except Exception as global_err:
+        print("WARN: global get_message_objects() failed: %s" % global_err)
 
     # --- Serialize as JSON between markers for the Node.js side to parse ---
     for entry in messages:
