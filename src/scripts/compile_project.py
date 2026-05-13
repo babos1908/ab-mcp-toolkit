@@ -90,10 +90,18 @@ try:
     else:
         raise TypeError("Application '%s' supports neither generate_code() nor build()." % app_name)
 
-    # --- Collect messages from every compile category, filtered by severity ---
+    # --- Collect messages from every compile category ---
+    #
+    # No severity_filter_mask passed to get_message_objects(): the bitwise OR
+    # of Severity enum members is fragile across CODESYS versions (Severity is
+    # sometimes a plain Enum, not [Flags]) and produces silent under-counts
+    # where Warning messages come through but Error messages do not. On
+    # AB 2.9 / CODESYS V3.5 SP19 this reproduces deterministically: a project
+    # with 2 errors + 1 warning returns 1 entry (the warning), 0 errors.
+    # Fetch everything and filter Python-side via the decoded severity string
+    # -- robust across runtime versions.
     messages = []
     severity_labels = {}
-    severity_filter_mask = None
     try:
         Severity = script_engine.Severity
         severity_labels = {
@@ -103,16 +111,17 @@ try:
             Severity.Information: 'info',
             Severity.Text: 'text',
         }
-        # Only pull errors/warnings/fatals - skip text noise like 'Build started'.
-        severity_filter_mask = Severity.FatalError | Severity.Error | Severity.Warning
     except Exception as se_err:
-        print("WARN: Could not set up severity filter: %s" % se_err)
+        print("WARN: Could not set up severity labels: %s" % se_err)
 
     def _sev_to_string(sev):
         try:
             return severity_labels.get(sev, str(sev).lower())
         except Exception:
             return 'unknown'
+
+    # Severities worth reporting. Info/text are noise (Build started, etc.).
+    KEEP_SEVS = ('fatal', 'error', 'warning')
 
     for guid_str in COMPILE_CATEGORY_GUIDS:
         try:
@@ -122,16 +131,16 @@ try:
             except Exception:
                 cat_name = guid_str
 
-            if severity_filter_mask is not None:
-                cat_msgs = script_engine.system.get_message_objects(cat_guid, severity_filter_mask)
-            else:
-                cat_msgs = script_engine.system.get_message_objects(cat_guid)
+            cat_msgs = script_engine.system.get_message_objects(cat_guid)
             if cat_msgs is None:
                 continue
             for msg in cat_msgs:
+                sev_str = _sev_to_string(getattr(msg, 'severity', None))
+                if sev_str not in KEEP_SEVS:
+                    continue
                 entry = {
                     'category': cat_name,
-                    'severity': _sev_to_string(getattr(msg, 'severity', None)),
+                    'severity': sev_str,
                     'text': getattr(msg, 'text', getattr(msg, 'message', str(msg))),
                 }
                 # Stable error code like "C0046" when available.
