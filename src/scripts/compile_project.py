@@ -58,37 +58,96 @@ try:
     except Exception as save_err:
         print("WARN: Pre-build save failed (continuing): %s" % save_err)
 
-    # --- Clear cached messages from compile categories ---
-    # Without this, get_message_objects() returns stale entries from previous
+    # --- Discover all message categories dynamically ---
+    #
+    # Hardcoded GUIDs (Build / Additional code checks / Precompile) cover the
+    # common cases but on bigger projects compile errors land in OTHER
+    # categories too (e.g. Library Manager, POU-specific, project-tree).
+    # Enumerate every category exposed by the runtime; fall back to the
+    # hardcoded triple if enumeration fails. Each entry is (Guid, name_str).
+    # NOTE: Guid is the .NET type exposed as script_engine.Guid, not a Python
+    # builtin -- using bare Guid("{...}") raises NameError silently.
+    all_categories = []
+    try:
+        cats = script_engine.system.get_message_categories()
+        if cats is not None:
+            for cat in cats:
+                cat_guid = None
+                cat_name = None
+                try:
+                    if hasattr(cat, 'guid'):
+                        cat_guid = cat.guid
+                        cat_name = getattr(cat, 'description', None) or getattr(cat, 'name', None)
+                    elif isinstance(cat, (tuple, list)) and len(cat) > 0:
+                        cat_guid = cat[0]
+                        if len(cat) > 1:
+                            cat_name = cat[1]
+                    else:
+                        # Probably a bare Guid
+                        cat_guid = cat
+                except Exception:
+                    pass
+                if cat_guid is None:
+                    continue
+                if cat_name is None:
+                    try:
+                        cat_name = script_engine.system.get_message_category_description(cat_guid)
+                    except Exception:
+                        cat_name = str(cat_guid)
+                all_categories.append((cat_guid, cat_name))
+    except Exception as cat_enum_err:
+        print("WARN: get_message_categories() enumeration failed: %s" % cat_enum_err)
+
+    if not all_categories:
+        print("DEBUG: Dynamic enumeration empty -- falling back to hardcoded compile categories.")
+        for guid_str in COMPILE_CATEGORY_GUIDS:
+            try:
+                cat_guid = script_engine.Guid('{%s}' % guid_str)
+                try:
+                    cat_name = script_engine.system.get_message_category_description(cat_guid)
+                except Exception:
+                    cat_name = guid_str
+                all_categories.append((cat_guid, cat_name))
+            except Exception as fallback_err:
+                print("WARN: hardcoded fallback for %s failed: %s" % (guid_str, fallback_err))
+
+    print("DEBUG: %d message categories will be scanned" % len(all_categories))
+
+    # --- Clear cached messages in every discovered category ---
+    # Without this, get_message_objects() returns stale entries from prior
     # builds and severity counts are wrong.
-    # NOTE: Guid type must be accessed via script_engine.Guid (it's a .NET
-    # type imported into the scriptengine module, not a Python builtin).
-    for guid_str in COMPILE_CATEGORY_GUIDS:
+    for cat_guid, cat_name in all_categories:
         try:
-            cat_guid = script_engine.Guid('{%s}' % guid_str)
             script_engine.system.clear_messages(cat_guid)
         except Exception as clr_err:
-            print("WARN: clear_messages(%s) failed: %s" % (guid_str, clr_err))
+            print("WARN: clear_messages('%s') failed: %s" % (cat_name, clr_err))
 
-    # --- Trigger code generation (F11 equivalent) ---
-    # generate_code() is the right API for the "Build > Build" UI command.
-    # application.build() does a softer pass that doesn't always invoke the
-    # full semantic analyzer; users would see "0 errors" via API while the
-    # IDE displays dozens of "Identifier not defined" / type mismatches.
-    print("DEBUG: Calling generate_code() on app '%s'..." % app_name)
+    # --- Trigger build ---
+    # Call BOTH build() and generate_code(): on bigger projects (libraries,
+    # multi-POU device trees), generate_code() alone can skip the semantic
+    # check and silently report 0 errors while the UI shows C0046. build() is
+    # the F11 equivalent and forces the full semantic analyzer. We run build()
+    # first then generate_code() for redundancy; clear_messages() above
+    # ensures we still get a clean message store.
+    build_invoked = False
+    if hasattr(target_app, 'build'):
+        try:
+            target_app.build()
+            print("DEBUG: build() executed for application '%s'." % app_name)
+            build_invoked = True
+        except Exception as build_err:
+            print("WARN: build() raised: %s" % build_err)
     if hasattr(target_app, 'generate_code'):
         try:
             target_app.generate_code()
             print("DEBUG: generate_code() executed for application '%s'." % app_name)
+            build_invoked = True
         except Exception as gen_err:
-            print("WARN: generate_code() failed, falling back to build(): %s" % gen_err)
-            if hasattr(target_app, 'build'):
-                target_app.build()
-    elif hasattr(target_app, 'build'):
-        target_app.build()
-        print("DEBUG: build() executed (no generate_code available).")
-    else:
-        raise TypeError("Application '%s' supports neither generate_code() nor build()." % app_name)
+            print("WARN: generate_code() raised: %s" % gen_err)
+    if not build_invoked:
+        raise TypeError(
+            "Application '%s' supports neither build() nor generate_code()." % app_name
+        )
 
     # --- Collect messages from every compile category ---
     #
@@ -123,21 +182,24 @@ try:
     # Severities worth reporting. Info/text are noise (Build started, etc.).
     KEEP_SEVS = ('fatal', 'error', 'warning')
 
-    for guid_str in COMPILE_CATEGORY_GUIDS:
+    # Iterate the dynamic category list built earlier. Print a per-category
+    # severity histogram to stdout so the watcher.log captures it for
+    # post-mortem if we miss something on bigger projects.
+    for cat_guid, cat_name in all_categories:
         try:
-            cat_guid = script_engine.Guid('{%s}' % guid_str)
-            try:
-                cat_name = script_engine.system.get_message_category_description(cat_guid)
-            except Exception:
-                cat_name = guid_str
-
             cat_msgs = script_engine.system.get_message_objects(cat_guid)
             if cat_msgs is None:
                 continue
+
+            # Diagnostic histogram (visible in watcher.log per session).
+            counts = {}
+            collected_in_cat = 0
             for msg in cat_msgs:
                 sev_str = _sev_to_string(getattr(msg, 'severity', None))
+                counts[sev_str] = counts.get(sev_str, 0) + 1
                 if sev_str not in KEEP_SEVS:
                     continue
+                collected_in_cat += 1
                 entry = {
                     'category': cat_name,
                     'severity': sev_str,
@@ -160,9 +222,12 @@ try:
                 elif hasattr(msg, 'position'):
                     entry['line'] = msg.position
                 messages.append(entry)
+            if counts:
+                print("DEBUG: category '%s' (%d msgs total, %d kept): %s"
+                      % (cat_name, sum(counts.values()), collected_in_cat, counts))
         except Exception as cat_err:
-            print("WARN: failed to collect messages for category %s: %s"
-                  % (guid_str, cat_err))
+            print("WARN: failed to collect messages for category '%s': %s"
+                  % (cat_name, cat_err))
 
     # --- Serialize as JSON between markers for the Node.js side to parse ---
     for entry in messages:
