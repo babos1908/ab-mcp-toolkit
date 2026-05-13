@@ -105,6 +105,7 @@ gh pr create --repo luke-harriman/Codesys-MCP --base main --head babos1908:fix/c
 | `State: ready, Mode: headless` dopo launch | Auto-launch fallback nascosto | `shutdown_codesys` → `launch_codesys`. |
 | `Parent object not found for path: X` | Fuzzy-match path fallita | `get_all_pou_code` per vedere la struttura esatta, usare quel path. |
 | AB zombie / non risponde | Detached spawn senza cleanup | `Stop-Process -Name AutomationBuilder -Force` (PowerShell) o Task Manager. |
+| `compile_project` ritorna `0 error(s)` ma l'UI mostra errori di sintassi | CODESYS non analizza POU non chiamati. Il MCP riporta correttamente quello che il compilatore dice; l'UI ha un linter live syntax-level. | Non è un bug del MCP. Per testare gli errori reali, inserire il typo in **codice raggiungibile** (es. `PLC_PRG`). Verifica via `%TEMP%\codesys-mcp-compile-debug.txt` (mirror diagnostic scritto da ogni `compile_project`). |
 
 ## File chiave
 

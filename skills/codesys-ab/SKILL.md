@@ -166,6 +166,11 @@ if N > 0:
 | AB resta zombie dopo errore | Detached spawn senza cleanup | `Stop-Process -Name AutomationBuilder -Force` (o Task Manager). |
 | `Cannot add an object because it affects a device you are currently logged into` (su `create_pou`/`set_pou_code`/`create_method`/`delete_object` o `compile_project`) | Una sessione online attiva blocca le modifiche structural alla configurazione device | Chiedi all'utente di fare `Online → Logout` dall'AB UI. **Non chiamare `disconnect_from_device` aspettandoti che funzioni** — vedi sotto. |
 | `disconnect_from_device` ritorna OK ma AB è ancora online | Limite **inherent** della scripting API di CODESYS V3.5 SP19 Standard edition (la sessione online creata dall'UI non è raggiungibile via `script_engine.online.create_online_application`, e `system.commands` non espone il menu `Online.Logout` su Standard) | Chiedi sempre all'utente di fare `Online → Logout` dall'AB UI prima di operazioni che richiedono PLC offline. Il tool MCP è un no-op affidabile **solo** quando già si era loggati via `connect_to_device` MCP. |
+| `compile_project` ritorna `0 error(s)` ma AB UI mostra errori syntax-level (es. `C0046 Identifier 'X' not defined`) | **CODESYS non analizza POU non chiamati nel call graph.** Un typo in una `FUNCTION` leaf mai invocata produce "Build complete -- 0 errors" dal compilatore. L'UI mostra l'errore via il linter live (syntax-level, separato dal compile). Il MCP riporta correttamente quello che il compilatore dice. | Non è un bug del MCP. Per testare il path-errore, iniettare il typo in **codice raggiungibile** (PLC_PRG o un FB chiamato dall'application attiva). Verifica con `%TEMP%\codesys-mcp-compile-debug.txt` (mirror diagnostic): cerca la riga `Build complete -- N errors, M warnings`. |
+
+### Diagnostica `compile_project` su disco
+
+Lo script di compile mirroris ogni `print()` a `%TEMP%\codesys-mcp-compile-debug.txt` (overwritten ogni run). Contiene: lista delle 6 categorie di message scansionate, istogramma severity per categoria, output testuale del compilatore (`Build complete -- N errors, M warnings`), eventuali WARN. Quando un compile sembra dare risultati strani, leggere quel file dà il quadro completo senza restart MCP né tornare al sorgente.
 
 ## ABB AC500 V3 — hardware FBs (`Pm` library)
 
