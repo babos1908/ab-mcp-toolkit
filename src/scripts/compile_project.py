@@ -82,13 +82,27 @@ try:
     project_name = os.path.basename(PROJECT_FILE_PATH)
 
     # --- Locate the application to compile ---
+    # --- Locate target: application (standard project) OR pool root (library) ---
+    #
+    # Standard `.project` files have an Application node under which Build
+    # (F11) runs. Library `.library` files do NOT; their POU/DUT/GVL live
+    # as Pool Objects at the project root, and the UI equivalent of F11 is
+    # "Build > Check all Pool Objects". We detect the project kind and dispatch
+    # accordingly. Detection order:
+    #   1. active_application (fastest, works on any standard project)
+    #   2. iterate children for is_application markers
+    #   3. file extension is .library
+    #   4. give up
     target_app = None
     app_name = "N/A"
+    project_kind = "unknown"  # 'application' | 'library' | 'unknown'
+
     try:
         target_app = primary_project.active_application
         if target_app:
             app_name = getattr(target_app, 'get_name', lambda: "Unnamed App (Active)")()
             print("DEBUG: Found active application: %s" % app_name)
+            project_kind = "application"
     except Exception as active_err:
         print("WARN: Could not get active application: %s. Searching..." % active_err)
 
@@ -106,11 +120,27 @@ try:
         except Exception as find_err:
             print("WARN: Error finding application object: %s" % find_err)
 
-        if not apps:
-            raise RuntimeError("No compilable application found in project '%s'" % project_name)
-        target_app = apps[0]
-        app_name = getattr(target_app, 'get_name', lambda: "Unnamed App (First Found)")()
-        print("WARN: Compiling first found application: %s" % app_name)
+        if apps:
+            target_app = apps[0]
+            app_name = getattr(target_app, 'get_name', lambda: "Unnamed App (First Found)")()
+            project_kind = "application"
+            print("WARN: Compiling first found application: %s" % app_name)
+        else:
+            # No Application node anywhere. Could be a library project.
+            is_library_ext = PROJECT_FILE_PATH.lower().endswith('.library')
+            has_lib_marker = (
+                (hasattr(primary_project, 'is_library') and getattr(primary_project, 'is_library', False)) or
+                (hasattr(primary_project, 'IsLibrary') and getattr(primary_project, 'IsLibrary', False))
+            )
+            if is_library_ext or has_lib_marker:
+                project_kind = "library"
+                app_name = "(library pool)"
+                print("DEBUG: Library project detected (ext=%s, marker=%s); will use Check-all-Pool-Objects path."
+                      % (is_library_ext, has_lib_marker))
+            else:
+                raise RuntimeError(
+                    "No compilable target found in project '%s' (no Application node and not a .library file)." % project_name
+                )
 
     # --- Save any pending edits so the build sees them ---
     try:
@@ -194,47 +224,98 @@ try:
             print("WARN: clear_messages('%s') failed: %s" % (cat_name, clr_err))
 
     # --- Trigger build ---
-    # Force a full rebuild by invalidating any precompile cache. Bigger
-    # projects ship a `<name>.precompilecache` file; when valid, the runtime
-    # may skip the semantic check entirely and emit zero errors for code
-    # the UI would flag. clean()/clean_all() are the documented hooks.
-    if hasattr(target_app, 'clean'):
-        try:
-            target_app.clean()
-            print("DEBUG: target_app.clean() executed for '%s'." % app_name)
-        except Exception as clean_err:
-            print("WARN: target_app.clean() raised: %s" % clean_err)
-    if hasattr(target_app, 'clean_all'):
-        try:
-            target_app.clean_all()
-            print("DEBUG: target_app.clean_all() executed for '%s'." % app_name)
-        except Exception as clean_err:
-            print("WARN: target_app.clean_all() raised: %s" % clean_err)
-
-    # Call BOTH build() and generate_code(): on bigger projects (libraries,
-    # multi-POU device trees), generate_code() alone can skip the semantic
-    # check and silently report 0 errors while the UI shows C0046. build()
-    # is the F11 equivalent and forces the full semantic analyzer. We run
-    # build() first then generate_code() for redundancy; clear_messages()
-    # plus clean() above keep the message store fresh.
+    # Dispatch based on project kind:
+    #   - application: clean() + build() + generate_code() on the app node
+    #   - library:     Check-all-Pool-Objects path (no Application exists)
     build_invoked = False
-    if hasattr(target_app, 'build'):
-        try:
-            target_app.build()
-            print("DEBUG: build() executed for application '%s'." % app_name)
-            build_invoked = True
-        except Exception as build_err:
-            print("WARN: build() raised: %s" % build_err)
-    if hasattr(target_app, 'generate_code'):
-        try:
-            target_app.generate_code()
-            print("DEBUG: generate_code() executed for application '%s'." % app_name)
-            build_invoked = True
-        except Exception as gen_err:
-            print("WARN: generate_code() raised: %s" % gen_err)
+
+    if project_kind == "application":
+        # Force a full rebuild by invalidating any precompile cache. Bigger
+        # projects ship a `<name>.precompilecache` file; when valid, the
+        # runtime may skip the semantic check entirely and emit zero errors
+        # for code the UI would flag.
+        if hasattr(target_app, 'clean'):
+            try:
+                target_app.clean()
+                print("DEBUG: target_app.clean() executed for '%s'." % app_name)
+            except Exception as clean_err:
+                print("WARN: target_app.clean() raised: %s" % clean_err)
+        if hasattr(target_app, 'clean_all'):
+            try:
+                target_app.clean_all()
+                print("DEBUG: target_app.clean_all() executed for '%s'." % app_name)
+            except Exception as clean_err:
+                print("WARN: target_app.clean_all() raised: %s" % clean_err)
+
+        # Call BOTH build() (F11 semantic check) and generate_code() (codegen).
+        # On bigger applications generate_code() alone can short-circuit and
+        # miss semantic errors; running both with clear_messages() upfront
+        # keeps the message store correct.
+        if hasattr(target_app, 'build'):
+            try:
+                target_app.build()
+                print("DEBUG: build() executed for application '%s'." % app_name)
+                build_invoked = True
+            except Exception as build_err:
+                print("WARN: build() raised: %s" % build_err)
+        if hasattr(target_app, 'generate_code'):
+            try:
+                target_app.generate_code()
+                print("DEBUG: generate_code() executed for application '%s'." % app_name)
+                build_invoked = True
+            except Exception as gen_err:
+                print("WARN: generate_code() raised: %s" % gen_err)
+
+    elif project_kind == "library":
+        # Library projects have no Application node. The UI equivalent of F11
+        # here is "Build > Check all Pool Objects". The scripting API exposes
+        # this under one of several names depending on AB / CODESYS version;
+        # try the documented ones and fall back to iterating pool objects.
+        pool_method_names = (
+            'check_all_pool_objects',
+            'checkall_pool_objects',
+            'check_pool_objects',
+            'compile_pool_objects',
+            'build_all',
+            'check_all',
+        )
+        for mname in pool_method_names:
+            if hasattr(primary_project, mname):
+                try:
+                    getattr(primary_project, mname)()
+                    print("DEBUG: primary_project.%s() executed for library." % mname)
+                    build_invoked = True
+                    break
+                except Exception as pool_err:
+                    print("WARN: primary_project.%s() raised: %s" % (mname, pool_err))
+
+        if not build_invoked:
+            # Fallback: iterate every child, call .check()/.compile() on each
+            # POU/DUT/GVL-like object. This is what AB's UI menu does under
+            # the hood for libraries.
+            print("DEBUG: No project-level pool-compile method worked; iterating children.")
+            try:
+                checked = 0
+                for child in primary_project.get_children(True):
+                    # Skip folders / namespaces / managers
+                    if getattr(child, 'is_folder', False):
+                        continue
+                    for verb in ('check', 'compile', 'build'):
+                        if hasattr(child, verb):
+                            try:
+                                getattr(child, verb)()
+                                checked += 1
+                                build_invoked = True
+                            except Exception:
+                                pass
+                            break
+                print("DEBUG: iterated pool: %d objects had a check/compile/build method that ran" % checked)
+            except Exception as iter_err:
+                print("WARN: pool-object iteration failed: %s" % iter_err)
+
     if not build_invoked:
         raise TypeError(
-            "Application '%s' supports neither build() nor generate_code()." % app_name
+            "Target '%s' (kind=%s) supports no known compile entry point." % (app_name, project_kind)
         )
 
     # --- Collect messages from every compile category ---
