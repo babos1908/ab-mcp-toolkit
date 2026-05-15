@@ -70,7 +70,7 @@ Una sola volta per sessione (o dopo `shutdown_codesys`). Serve all'utente per ve
 - `rename_symbol(projectFilePath, oldName, newName, ...)` → refactor.
 
 ### Build
-- `compile_project(projectFilePath)` → sincrono, ritorna `N error(s), M warning(s)`.
+- `compile_project(projectFilePath)` → sincrono, ritorna `N error(s), M warning(s)`. Supporta sia **`.project`** standard (compila l'Application via `clean()` + `build()` + `generate_code()`) sia **`.library`** (Pool Objects via `check_all_pool_objects()` o fallback iterativo su `get_children`).
 - `get_compile_messages(projectFilePath)` → ultimi messaggi cached (no nuovo build).
 
 ### Libraries
