@@ -57,8 +57,9 @@ Una sola volta per sessione (o dopo `shutdown_codesys`). Serve all'utente per ve
 
 ### CRUD POU / Code units
 - `create_pou(projectFilePath, name, type, language, parentPath, returnType?)`
-  - `type`: `Program` | `FunctionBlock` | `Function`
+  - `type`: `Program` | `FunctionBlock` | `Function` | `Interface`
   - **Function richiede `returnType`** (es. `"BOOL"`, `"STRING"`, `"INT"`). Senza, errore handler-level.
+  - **`Interface`** crea un contratto OOP astratto (solo signature). Niente implementazione. I metodi si aggiungono dopo via `create_method`. Su build CODESYS senza `PouType.Interface` esposto, il tool ritorna un errore descrittivo.
 - `set_pou_code(projectFilePath, pouPath, declaration?, implementation?)` → modifica codice.
 - `create_method(projectFilePath, parentPouPath, name, returnType?, ...)`.
 - `create_property(projectFilePath, parentPouPath, name, propertyType, ...)`.
