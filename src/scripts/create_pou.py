@@ -25,15 +25,11 @@ try:
     if not POU_NAME: raise ValueError("POU name empty.")
     if not PARENT_PATH_REL: raise ValueError("Parent path empty.")
 
-    # Resolve POU Type Enum
+    # Resolve POU Type Enum (Interface may be None here -- we have a separate
+    # create_interface() method to fall back to below).
     pou_type_enum = pou_type_map.get(POU_TYPE_STR)
-    if pou_type_enum is None:
+    if pou_type_enum is None and POU_TYPE_STR != "Interface":
         available = sorted(pou_type_map.keys())
-        if POU_TYPE_STR == "Interface":
-            raise ValueError(
-                "POU type 'Interface' is not exposed by this CODESYS/AB build. "
-                "script_engine.PouType has no 'Interface' member. Available: %s" % available
-            )
         raise ValueError(
             "Invalid POU type string: '%s'. Use one of: %s" % (POU_TYPE_STR, available)
         )
@@ -101,11 +97,55 @@ try:
 
     print("DEBUG: Calling parent_object.create_pou: Name='%s', Type=%s, Lang=%s, ReturnType='%s'" % (POU_NAME, pou_type_enum, lang_guid, RETURN_TYPE))
 
-    # Function POUs require a return_type kwarg per CODESYS scripting API;
-    # Program/FunctionBlock/Interface do not. Interface POUs also have no
-    # implementation language (only method signatures), so we omit the
-    # language kwarg too -- some AB builds reject `language=...` on Interface.
-    if pou_type_enum == script_engine.PouType.Function:
+    # Interface POUs in CODESYS V3 / AB 2.9 are typically created via a
+    # SEPARATE method `parent.create_interface(name)` rather than via
+    # `create_pou(type=PouType.Interface)`. Try the separate method first;
+    # fall back to create_pou with the enum if the build exposes it.
+    if POU_TYPE_STR == "Interface":
+        new_pou = None
+        # Path A: dedicated create_interface() method
+        if hasattr(parent_object, 'create_interface'):
+            try:
+                new_pou = parent_object.create_interface(POU_NAME)
+                print("DEBUG: parent_object.create_interface() succeeded.")
+            except TypeError:
+                # Some builds want extra kwargs; retry common signatures.
+                try:
+                    new_pou = parent_object.create_interface(name=POU_NAME)
+                except Exception as ci_err:
+                    print("WARN: create_interface(name=...) raised: %s" % ci_err)
+            except Exception as ci_err:
+                print("WARN: create_interface() raised: %s" % ci_err)
+        # Path B: create_pou with PouType.Interface enum
+        if new_pou is None and hasattr(script_engine.PouType, 'Interface'):
+            try:
+                new_pou = parent_object.create_pou(
+                    name=POU_NAME,
+                    type=script_engine.PouType.Interface
+                )
+                print("DEBUG: parent_object.create_pou(type=PouType.Interface) succeeded.")
+            except TypeError:
+                try:
+                    new_pou = parent_object.create_pou(
+                        name=POU_NAME,
+                        type=script_engine.PouType.Interface,
+                        language=lang_guid
+                    )
+                except Exception as cp_err:
+                    print("WARN: create_pou(type=Interface, language=...) raised: %s" % cp_err)
+            except Exception as cp_err:
+                print("WARN: create_pou(type=Interface) raised: %s" % cp_err)
+        # Path C: diagnostic dump if both paths failed
+        if new_pou is None:
+            pou_types = [a for a in dir(script_engine.PouType) if not a.startswith('_')]
+            parent_creates = [a for a in dir(parent_object) if a.lower().startswith('create')]
+            raise RuntimeError(
+                "Could not create Interface '%s'. Neither parent.create_interface() nor "
+                "parent.create_pou(type=PouType.Interface) succeeded on this build. "
+                "Available PouType members: %s. Parent create_* methods: %s." %
+                (POU_NAME, pou_types, parent_creates)
+            )
+    elif pou_type_enum == script_engine.PouType.Function:
         actual_return_type = RETURN_TYPE if RETURN_TYPE else None
         if actual_return_type is None:
             raise ValueError("Function POU '%s' requires a return_type. Provide the 'returnType' tool parameter (e.g. 'BOOL', 'STRING', 'INT')." % POU_NAME)
@@ -115,21 +155,6 @@ try:
             language=lang_guid, # Pass None to use default
             return_type=actual_return_type
         )
-    elif hasattr(script_engine.PouType, 'Interface') and pou_type_enum == script_engine.PouType.Interface:
-        # Interfaces are pure contracts -- no implementation, no language.
-        try:
-            new_pou = parent_object.create_pou(
-                name=POU_NAME,
-                type=pou_type_enum
-            )
-        except TypeError:
-            # Some builds insist on the language kwarg even for Interface;
-            # retry passing None.
-            new_pou = parent_object.create_pou(
-                name=POU_NAME,
-                type=pou_type_enum,
-                language=lang_guid
-            )
     else:
         new_pou = parent_object.create_pou(
             name=POU_NAME,
