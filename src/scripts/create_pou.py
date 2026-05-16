@@ -9,8 +9,13 @@ RETURN_TYPE = "{RETURN_TYPE}"  # Required for Function POUs (e.g. "BOOL", "STRIN
 pou_type_map = {
     "Program": script_engine.PouType.Program,
     "FunctionBlock": script_engine.PouType.FunctionBlock,
-    "Function": script_engine.PouType.Function
+    "Function": script_engine.PouType.Function,
 }
+# Interface is exposed by AB 2.9 / CODESYS V3.5 SP19 but not on every build.
+# Probe for the enum member at module-load time rather than at call time so
+# the failure mode is obvious in the DEBUG log.
+if hasattr(script_engine.PouType, 'Interface'):
+    pou_type_map["Interface"] = script_engine.PouType.Interface
 # Map common language names to ImplementationLanguages attributes if needed (optional, None usually works)
 # lang_map = { "ST": script_engine.ImplementationLanguage.st, ... }
 
@@ -22,7 +27,16 @@ try:
 
     # Resolve POU Type Enum
     pou_type_enum = pou_type_map.get(POU_TYPE_STR)
-    if not pou_type_enum: raise ValueError("Invalid POU type string: %s. Use Program, FunctionBlock, or Function." % POU_TYPE_STR)
+    if pou_type_enum is None:
+        available = sorted(pou_type_map.keys())
+        if POU_TYPE_STR == "Interface":
+            raise ValueError(
+                "POU type 'Interface' is not exposed by this CODESYS/AB build. "
+                "script_engine.PouType has no 'Interface' member. Available: %s" % available
+            )
+        raise ValueError(
+            "Invalid POU type string: '%s'. Use one of: %s" % (POU_TYPE_STR, available)
+        )
 
     # For common case where user just specified "Application", automatically try to find it
     if PARENT_PATH_REL == "Application":
@@ -88,7 +102,9 @@ try:
     print("DEBUG: Calling parent_object.create_pou: Name='%s', Type=%s, Lang=%s, ReturnType='%s'" % (POU_NAME, pou_type_enum, lang_guid, RETURN_TYPE))
 
     # Function POUs require a return_type kwarg per CODESYS scripting API;
-    # Program/FunctionBlock create_pou does not accept it. Branch accordingly.
+    # Program/FunctionBlock/Interface do not. Interface POUs also have no
+    # implementation language (only method signatures), so we omit the
+    # language kwarg too -- some AB builds reject `language=...` on Interface.
     if pou_type_enum == script_engine.PouType.Function:
         actual_return_type = RETURN_TYPE if RETURN_TYPE else None
         if actual_return_type is None:
@@ -99,6 +115,21 @@ try:
             language=lang_guid, # Pass None to use default
             return_type=actual_return_type
         )
+    elif hasattr(script_engine.PouType, 'Interface') and pou_type_enum == script_engine.PouType.Interface:
+        # Interfaces are pure contracts -- no implementation, no language.
+        try:
+            new_pou = parent_object.create_pou(
+                name=POU_NAME,
+                type=pou_type_enum
+            )
+        except TypeError:
+            # Some builds insist on the language kwarg even for Interface;
+            # retry passing None.
+            new_pou = parent_object.create_pou(
+                name=POU_NAME,
+                type=pou_type_enum,
+                language=lang_guid
+            )
     else:
         new_pou = parent_object.create_pou(
             name=POU_NAME,
