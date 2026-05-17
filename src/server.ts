@@ -340,16 +340,16 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   s.tool(
     'create_pou',
-    'Creates a new Program, Function Block, or Function POU within the specified CODESYS project.',
+    'Creates a new Program, Function Block, Function, Interface, or Parameter List POU within the specified CODESYS project.',
     {
       projectFilePath: z.string().describe("Path to the project file."),
       name: z.string().min(1).describe("Name for the new POU (must be a valid IEC identifier)."),
-      type: z.enum(['Program', 'FunctionBlock', 'Function', 'Interface']).describe("Type of POU. 'Interface' creates an abstract OOP contract with no implementation; add methods to it via the create_method tool."),
-      language: z.enum(['ST', 'LD', 'FBD', 'SFC', 'IL', 'CFC']).describe("Implementation language."),
+      type: z.enum(['Program', 'FunctionBlock', 'Function', 'Interface', 'ParameterList']).describe("Type of POU. 'Interface' creates an abstract OOP contract with no implementation; add methods to it via the create_method tool. 'ParameterList' creates a CODESYS Parameter List (library consumer-overridable VAR_GLOBAL CONSTANT block surfaced under the Library Manager 'Parameters' tab); populate it with set_pou_code on the declaration section."),
+      language: z.enum(['ST', 'LD', 'FBD', 'SFC', 'IL', 'CFC']).describe("Implementation language. Ignored for Interface and ParameterList POUs (no implementation section)."),
       parentPath: z.string().min(1).describe("Relative path under project root or application (e.g., 'Application')."),
-      returnType: z.string().describe("Return type for Function POUs (e.g., 'BOOL', 'STRING', 'INT', 'REAL'). Required when type is 'Function'; ignored for 'Program' and 'FunctionBlock'.").optional(),
+      returnType: z.string().describe("Return type for Function POUs (e.g., 'BOOL', 'STRING', 'INT', 'REAL'). Required when type is 'Function'; ignored for 'Program', 'FunctionBlock', 'Interface', and 'ParameterList'.").optional(),
     },
-    async (args: { projectFilePath: string; name: string; type: 'Program' | 'FunctionBlock' | 'Function' | 'Interface'; language: 'ST' | 'LD' | 'FBD' | 'SFC' | 'IL' | 'CFC'; parentPath: string; returnType?: string }) => {
+    async (args: { projectFilePath: string; name: string; type: 'Program' | 'FunctionBlock' | 'Function' | 'Interface' | 'ParameterList'; language: 'ST' | 'LD' | 'FBD' | 'SFC' | 'IL' | 'CFC'; parentPath: string; returnType?: string }) => {
       // Function POUs require a return_type per CODESYS scripting API.
       if (args.type === 'Function' && (!args.returnType || !args.returnType.trim())) {
         return {

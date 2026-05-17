@@ -16,6 +16,12 @@ pou_type_map = {
 # the failure mode is obvious in the DEBUG log.
 if hasattr(script_engine.PouType, 'Interface'):
     pou_type_map["Interface"] = script_engine.PouType.Interface
+# ParameterList: V3 exposes it via parent.create_parameterlist(name) on
+# AB 2.9. Same probe pattern as Interface -- if the enum member exists
+# it acts as a fallback path; otherwise the dedicated method below covers
+# every shipping build.
+if hasattr(script_engine.PouType, 'ParameterList'):
+    pou_type_map["ParameterList"] = script_engine.PouType.ParameterList
 # Map common language names to ImplementationLanguages attributes if needed (optional, None usually works)
 # lang_map = { "ST": script_engine.ImplementationLanguage.st, ... }
 
@@ -25,10 +31,11 @@ try:
     if not POU_NAME: raise ValueError("POU name empty.")
     if not PARENT_PATH_REL: raise ValueError("Parent path empty.")
 
-    # Resolve POU Type Enum (Interface may be None here -- we have a separate
-    # create_interface() method to fall back to below).
+    # Resolve POU Type Enum (Interface / ParameterList may be None here --
+    # we have dedicated create_interface() / create_parameterlist() methods
+    # to fall back to below on builds that don't expose the enum members).
     pou_type_enum = pou_type_map.get(POU_TYPE_STR)
-    if pou_type_enum is None and POU_TYPE_STR != "Interface":
+    if pou_type_enum is None and POU_TYPE_STR not in ("Interface", "ParameterList"):
         available = sorted(pou_type_map.keys())
         raise ValueError(
             "Invalid POU type string: '%s'. Use one of: %s" % (POU_TYPE_STR, available)
@@ -142,6 +149,57 @@ try:
             raise RuntimeError(
                 "Could not create Interface '%s'. Neither parent.create_interface() nor "
                 "parent.create_pou(type=PouType.Interface) succeeded on this build. "
+                "Available PouType members: %s. Parent create_* methods: %s." %
+                (POU_NAME, pou_types, parent_creates)
+            )
+    elif POU_TYPE_STR == "ParameterList":
+        # Parameter List POUs in CODESYS V3 / AB 2.9 are created via a
+        # dedicated `parent.create_parameterlist(name)` method (analogous
+        # to create_interface). The resulting POU exposes a single
+        # VAR_GLOBAL CONSTANT block on its textual_declaration -- consumers
+        # of the library can override these constants without forking, and
+        # they show up under the Library Manager 'Parameters' tab.
+        new_pou = None
+        # Path A: dedicated create_parameterlist() method
+        if hasattr(parent_object, 'create_parameterlist'):
+            try:
+                new_pou = parent_object.create_parameterlist(POU_NAME)
+                print("DEBUG: parent_object.create_parameterlist() succeeded.")
+            except TypeError:
+                try:
+                    new_pou = parent_object.create_parameterlist(name=POU_NAME)
+                    print("DEBUG: parent_object.create_parameterlist(name=...) succeeded.")
+                except Exception as cpl_err:
+                    print("WARN: create_parameterlist(name=...) raised: %s" % cpl_err)
+            except Exception as cpl_err:
+                print("WARN: create_parameterlist() raised: %s" % cpl_err)
+        # Path B: create_pou with PouType.ParameterList enum (future builds)
+        if new_pou is None and hasattr(script_engine.PouType, 'ParameterList'):
+            try:
+                new_pou = parent_object.create_pou(
+                    name=POU_NAME,
+                    type=script_engine.PouType.ParameterList
+                )
+                print("DEBUG: parent_object.create_pou(type=PouType.ParameterList) succeeded.")
+            except TypeError:
+                try:
+                    new_pou = parent_object.create_pou(
+                        name=POU_NAME,
+                        type=script_engine.PouType.ParameterList,
+                        language=lang_guid
+                    )
+                    print("DEBUG: parent_object.create_pou(type=PouType.ParameterList, language=...) succeeded.")
+                except Exception as cp_err:
+                    print("WARN: create_pou(type=ParameterList, language=...) raised: %s" % cp_err)
+            except Exception as cp_err:
+                print("WARN: create_pou(type=ParameterList) raised: %s" % cp_err)
+        # Path C: diagnostic dump if both paths failed
+        if new_pou is None:
+            pou_types = [a for a in dir(script_engine.PouType) if not a.startswith('_')]
+            parent_creates = [a for a in dir(parent_object) if a.lower().startswith('create')]
+            raise RuntimeError(
+                "Could not create ParameterList '%s'. Neither parent.create_parameterlist() nor "
+                "parent.create_pou(type=PouType.ParameterList) succeeded on this build. "
                 "Available PouType members: %s. Parent create_* methods: %s." %
                 (POU_NAME, pou_types, parent_creates)
             )
