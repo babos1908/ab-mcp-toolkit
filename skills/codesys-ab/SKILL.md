@@ -57,9 +57,10 @@ Una sola volta per sessione (o dopo `shutdown_codesys`). Serve all'utente per ve
 
 ### CRUD POU / Code units
 - `create_pou(projectFilePath, name, type, language, parentPath, returnType?)`
-  - `type`: `Program` | `FunctionBlock` | `Function` | `Interface`
+  - `type`: `Program` | `FunctionBlock` | `Function` | `Interface` | `ParameterList`
   - **Function richiede `returnType`** (es. `"BOOL"`, `"STRING"`, `"INT"`). Senza, errore handler-level.
   - **`Interface`** crea un contratto OOP astratto (solo signature). Niente implementazione. I metodi si aggiungono dopo via `create_method`. Su build CODESYS senza `PouType.Interface` esposto, il tool ritorna un errore descrittivo.
+  - **`ParameterList`** crea una Parameter List (POU CODESYS V3 con singolo `VAR_GLOBAL CONSTANT` block, esposto sotto il tab "Parameters" del Library Manager nei consumer). Tipico in library projects per consentire override di capacità/timeout/buffer senza forkare. Niente implementation section: si popola la dichiarazione via `set_pou_code(... , declaration=...)`. Usa `parent.create_parameterlist(name)` su AB 2.9; fallback su `PouType.ParameterList` per build future.
 - `set_pou_code(projectFilePath, pouPath, declaration?, implementation?)` → modifica codice.
 - `create_method(projectFilePath, parentPouPath, name, returnType?, ...)`.
 - `create_property(projectFilePath, parentPouPath, name, propertyType, ...)`.
