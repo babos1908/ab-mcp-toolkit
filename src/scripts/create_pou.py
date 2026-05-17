@@ -154,26 +154,58 @@ try:
             )
     elif POU_TYPE_STR == "ParameterList":
         # Parameter List POUs in CODESYS V3 / AB 2.9 are created via a
-        # dedicated `parent.create_parameterlist(name)` method (analogous
-        # to create_interface). The resulting POU exposes a single
-        # VAR_GLOBAL CONSTANT block on its textual_declaration -- consumers
-        # of the library can override these constants without forking, and
-        # they show up under the Library Manager 'Parameters' tab.
+        # dedicated method (analogous to create_interface). The resulting
+        # POU exposes a single VAR_GLOBAL CONSTANT block on its
+        # textual_declaration -- consumers of the library can override
+        # these constants without forking, and they show up under the
+        # Library Manager 'Parameters' tab.
+        #
+        # Empirical 2026-05-17 on AB 2.9 Standard against
+        # `NexoMqttLib.library`: PouType.ParameterList is NOT in the
+        # PouType enum, AND `parent.create_parameterlist` is not exposed
+        # on the library root either. Diagnostic showed dir() returning
+        # zero `create_*` methods despite create_pou being callable,
+        # confirming AB's parent objects are .NET COM proxies where dir()
+        # does not enumerate explicit-interface members. We therefore
+        # probe candidate method names with hasattr() (which DOES probe
+        # the COM proxy correctly), and report which ones are present in
+        # the diagnostic so the next failure surfaces actionable info.
         new_pou = None
-        # Path A: dedicated create_parameterlist() method
-        if hasattr(parent_object, 'create_parameterlist'):
+        attempt_log = []
+
+        # Candidate method names worth trying. Order: most-likely-correct
+        # first based on CODESYS V3 naming conventions and the Interface
+        # path that already works on AB 2.9 Standard via create_interface().
+        candidate_methods = (
+            'create_parameterlist',
+            'create_parameter_list',
+            'create_global_textual_list',
+            'create_constants_list',
+            'create_parameters',
+            'add_parameterlist',
+            'add_parameter_list',
+        )
+        for method_name in candidate_methods:
+            if not hasattr(parent_object, method_name):
+                attempt_log.append("%s: not present on parent" % method_name)
+                continue
+            method = getattr(parent_object, method_name)
             try:
-                new_pou = parent_object.create_parameterlist(POU_NAME)
-                print("DEBUG: parent_object.create_parameterlist() succeeded.")
-            except TypeError:
+                new_pou = method(POU_NAME)
+                print("DEBUG: parent_object.%s(%r) succeeded." % (method_name, POU_NAME))
+                break
+            except TypeError as te:
                 try:
-                    new_pou = parent_object.create_parameterlist(name=POU_NAME)
-                    print("DEBUG: parent_object.create_parameterlist(name=...) succeeded.")
-                except Exception as cpl_err:
-                    print("WARN: create_parameterlist(name=...) raised: %s" % cpl_err)
-            except Exception as cpl_err:
-                print("WARN: create_parameterlist() raised: %s" % cpl_err)
-        # Path B: create_pou with PouType.ParameterList enum (future builds)
+                    new_pou = method(name=POU_NAME)
+                    print("DEBUG: parent_object.%s(name=%r) succeeded." % (method_name, POU_NAME))
+                    break
+                except Exception as e2:
+                    attempt_log.append("%s positional + named: TypeError positional (%s), then %s named" % (method_name, te, type(e2).__name__))
+            except Exception as e:
+                attempt_log.append("%s: %s: %s" % (method_name, type(e).__name__, e))
+
+        # Path B: create_pou with PouType.ParameterList enum (future builds
+        # that expose the member -- known absent on AB 2.9 Standard SP19).
         if new_pou is None and hasattr(script_engine.PouType, 'ParameterList'):
             try:
                 new_pou = parent_object.create_pou(
@@ -190,18 +222,52 @@ try:
                     )
                     print("DEBUG: parent_object.create_pou(type=PouType.ParameterList, language=...) succeeded.")
                 except Exception as cp_err:
-                    print("WARN: create_pou(type=ParameterList, language=...) raised: %s" % cp_err)
+                    attempt_log.append("create_pou(type=ParameterList, language=...): %s" % cp_err)
             except Exception as cp_err:
-                print("WARN: create_pou(type=ParameterList) raised: %s" % cp_err)
-        # Path C: diagnostic dump if both paths failed
+                attempt_log.append("create_pou(type=ParameterList): %s" % cp_err)
+        elif new_pou is None:
+            attempt_log.append("PouType.ParameterList: not in enum (typical on AB 2.9 Standard)")
+
+        # Path C: template-based creation. CODESYS V3 exposes
+        # create_pou_with_template / create_object_from_template on some
+        # parent types; the template GUID for Parameter List would have
+        # to be discovered (likely vendor-private). We probe for the
+        # methods so the diagnostic surfaces them if they exist.
         if new_pou is None:
+            for tmpl_method in ('create_pou_with_template', 'create_object_from_template'):
+                if hasattr(parent_object, tmpl_method):
+                    attempt_log.append(
+                        "%s: present but template GUID for ParameterList is unknown on this build; "
+                        "cannot probe without a template registry" % tmpl_method
+                    )
+
+        # Path D: enhanced diagnostic. dir() is unreliable on COM proxies,
+        # so probe a known list via hasattr() and report what's actually
+        # callable on the parent. This is the info to forward upstream if
+        # the failure recurs.
+        if new_pou is None:
+            probe_names = (
+                'create_pou', 'create_method', 'create_interface', 'create_property',
+                'create_gvl', 'create_dut', 'create_folder', 'create_action',
+                'create_parameterlist', 'create_parameter_list',
+                'create_pou_with_template', 'create_object_from_template',
+                'create_global_textual_list', 'create_constants_list',
+                'add_object', 'add_pou', 'add_parameterlist', 'add_parameter_list',
+                'children', 'templates', 'import_native', 'export_native',
+            )
+            present_on_parent = [n for n in probe_names if hasattr(parent_object, n)]
             pou_types = [a for a in dir(script_engine.PouType) if not a.startswith('_')]
-            parent_creates = [a for a in dir(parent_object) if a.lower().startswith('create')]
             raise RuntimeError(
-                "Could not create ParameterList '%s'. Neither parent.create_parameterlist() nor "
-                "parent.create_pou(type=PouType.ParameterList) succeeded on this build. "
-                "Available PouType members: %s. Parent create_* methods: %s." %
-                (POU_NAME, pou_types, parent_creates)
+                "Could not create ParameterList '%s'. No working API path found on this "
+                "AB / CODESYS build (likely the Standard edition, which does not surface "
+                "Parameter List creation through the IronPython ScriptEngine). "
+                "Workaround: create the POU manually in the AB UI "
+                "(Add Object -> Parameter List), then populate it via set_pou_code on "
+                "the declaration section. "
+                "Attempt log: %s. "
+                "Available PouType members: %s. "
+                "Methods present on parent (probed via hasattr, not dir): %s." %
+                (POU_NAME, attempt_log, pou_types, present_on_parent)
             )
     elif pou_type_enum == script_engine.PouType.Function:
         actual_return_type = RETURN_TYPE if RETURN_TYPE else None
