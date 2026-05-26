@@ -86,6 +86,89 @@ export class IpcClient {
     return fs.existsSync(signalPath);
   }
 
+  /**
+   * Get the age (seconds) of the watcher's heartbeat.signal file. Returns
+   * null if the file does not exist (e.g. watcher hasn't run a single loop
+   * iteration yet, or it never wrote one). A stale age (typically > 30s)
+   * means the watcher's worker thread died OR the primary UI thread is
+   * deadlocked -- both unrecoverable without a process restart.
+   */
+  async getHeartbeatAgeSeconds(): Promise<number | null> {
+    const heartbeatPath = path.join(this.config.baseDir, 'heartbeat.signal');
+    try {
+      const stat = fs.statSync(heartbeatPath);
+      const ageMs = Date.now() - stat.mtimeMs;
+      return ageMs / 1000;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Read the contents of watcher_error.txt (the watcher's fatal error log,
+   * written before any other logging is set up). Returns null if the file
+   * does not exist. Useful for diagnose_mcp_state to surface why a watcher
+   * never started.
+   */
+  async readWatcherErrorLog(): Promise<string | null> {
+    const errorPath = path.join(this.config.baseDir, 'watcher_error.txt');
+    try {
+      if (!fs.existsSync(errorPath)) return null;
+      return fs.readFileSync(errorPath, 'utf-8');
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Count files in commands/ and results/ for diagnose_mcp_state. A high
+   * pending command count means commands are backing up (watcher slow or
+   * deadlocked); a high orphan result count means results are accumulating
+   * without being consumed (Node-side cleanup broken).
+   */
+  async getQueueDepth(): Promise<{ pendingCommands: number; orphanResults: number }> {
+    let pending = 0;
+    let orphan = 0;
+    try {
+      const cmdFiles = fs.readdirSync(this.commandsDir);
+      pending = cmdFiles.filter((f) => f.endsWith('.command.json')).length;
+    } catch { /* ignore */ }
+    try {
+      const resFiles = fs.readdirSync(this.resultsDir);
+      orphan = resFiles.filter((f) => f.endsWith('.result.json')).length;
+    } catch { /* ignore */ }
+    return { pendingCommands: pending, orphanResults: orphan };
+  }
+
+  /**
+   * Remove orphan files in commands/ and results/ older than a threshold.
+   * Called at launcher startup AND by force_reset_watcher to clean up state
+   * from a previous (crashed/stalled) session before re-launching.
+   */
+  async cleanupStaleFiles(maxAgeSeconds: number = 3600): Promise<{ removed: number }> {
+    const nowMs = Date.now();
+    const cutoffMs = maxAgeSeconds * 1000;
+    let removed = 0;
+    for (const dir of [this.commandsDir, this.resultsDir]) {
+      try {
+        for (const fn of fs.readdirSync(dir)) {
+          const fp = path.join(dir, fn);
+          try {
+            const stat = fs.statSync(fp);
+            if (nowMs - stat.mtimeMs > cutoffMs) {
+              fs.unlinkSync(fp);
+              removed++;
+            }
+          } catch { /* skip files that can't be stat'd */ }
+        }
+      } catch { /* dir doesn't exist yet */ }
+    }
+    if (removed > 0) {
+      ipcLog.info(`cleanupStaleFiles removed ${removed} stale file(s)`);
+    }
+    return { removed };
+  }
+
   /** Write terminate.signal to request watcher shutdown */
   async sendTerminate(): Promise<void> {
     const signalPath = path.join(this.config.baseDir, 'terminate.signal');

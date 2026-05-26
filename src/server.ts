@@ -12,7 +12,7 @@ import { ServerConfig, IpcResult, ScriptExecutor, ExecutionMode } from './types'
 import { CodesysLauncher } from './launcher';
 import { HeadlessExecutor } from './headless';
 import { ScriptManager } from './script-manager';
-import { ExecutorProxy } from './executor-proxy';
+import { ExecutorProxy, ResilientExecutor } from './executor-proxy';
 import { parseResultJson } from './result-parser';
 import { serverLog, setLogLevel } from './logger';
 
@@ -88,12 +88,20 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
   // executeScript on a readiness promise that's atomically updated whenever
   // the inner executor changes (see executor-proxy.ts for the contract).
   let launcher: CodesysLauncher | null = null;
+  // resilientLauncher wraps `launcher` with auto-recovery on consecutive
+  // timeouts. We swap THIS into the executor proxy (not the raw launcher),
+  // so command timeouts trigger forceReset() + retry transparently when
+  // the watcher silently goes catatonic. Created together with the launcher
+  // so handlers that pass `launcher` to `executor.swap*` get the resilient
+  // wrapper instead.
+  let resilientLauncher: ResilientExecutor | null = null;
   let executionMode: ExecutionMode = config.mode;
   const initialExecutor: ScriptExecutor = new HeadlessExecutor(config);
   const executor = new ExecutorProxy(initialExecutor);
 
   if (config.mode === 'persistent') {
     launcher = new CodesysLauncher(config);
+    resilientLauncher = new ResilientExecutor(launcher);
     // Start in headless mode; we'll swap to the persistent launcher once it's
     // ready (see "Background auto-launch" block below).
     executionMode = 'headless';
@@ -134,7 +142,9 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       }
       try {
         await launcher.launch();
-        executor.swapNow(launcher);
+        // Swap in the RESILIENT wrapper, not the raw launcher, so command
+        // timeouts trigger auto-recovery via forceReset().
+        executor.swapNow(resilientLauncher!);
         executionMode = 'persistent';
         return {
           content: [{ type: 'text' as const, text: 'CODESYS launched successfully in persistent mode.' }],
@@ -182,7 +192,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
         // confirm=true → finalise attach: poll ready.signal, swap executor.
         await launcher.completeAttach();
-        executor.swapNow(launcher);
+        executor.swapNow(resilientLauncher!);
         executionMode = 'persistent';
         return {
           content: [{ type: 'text' as const, text: 'Attached. Persistent mode active — subsequent tool calls run inside the user\'s CODESYS GUI session.' }],
@@ -230,15 +240,16 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   s.tool(
     'get_codesys_status',
-    'Get the current status of the CODESYS instance (state, PID, mode).',
+    "Get the current status of the CODESYS instance: lifecycle state, PID, mode, and watcher heartbeat age. State='stalled' means the watcher heartbeat has gone stale (worker thread dead or primary UI thread deadlocked) and force_reset_watcher should be called to recover.",
     async () => {
-      const status = launcher ? launcher.getStatus() : {
+      const status = launcher ? await launcher.getStatusAsync() : {
         state: 'stopped',
         pid: null,
         sessionId: null,
         ipcDir: null,
         startedAt: null,
         lastError: null,
+        heartbeatAgeSeconds: null,
       };
       const text = [
         `State: ${status.state}`,
@@ -246,10 +257,84 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         `PID: ${status.pid ?? 'N/A'}`,
         `Session: ${status.sessionId ?? 'N/A'}`,
         `Started: ${status.startedAt ? new Date(status.startedAt).toISOString() : 'N/A'}`,
+        status.heartbeatAgeSeconds !== null && status.heartbeatAgeSeconds !== undefined
+          ? `Heartbeat: ${status.heartbeatAgeSeconds.toFixed(1)}s ago`
+          : `Heartbeat: never (no heartbeat.signal yet)`,
         status.lastError ? `Last Error: ${status.lastError}` : null,
       ].filter(Boolean).join('\n');
       return {
         content: [{ type: 'text' as const, text }],
+        isError: false,
+      };
+    }
+  );
+
+  s.tool(
+    'force_reset_watcher',
+    "Recovery tool for when the CODESYS MCP appears 'locked' (commands time out / state is 'stalled' / agent suspects watcher is dead). Kills the CODESYS process, cleans up the IPC directory, and re-launches CODESYS with a fresh watcher in a single operation. Equivalent to shutdown_codesys + launch_codesys but faster (~10-30s) and with stale-file cleanup in between. Does NOT save any open project (the project state is unknown when the watcher is stalled). Use after diagnose_mcp_state confirms a stall.",
+    async () => {
+      if (!launcher) {
+        return {
+          content: [{ type: 'text' as const, text: 'No launcher instance available (server is in headless mode). force_reset_watcher only applies to persistent mode.' }],
+          isError: true,
+        };
+      }
+      try {
+        await launcher.forceReset();
+        const status = await launcher.getStatusAsync();
+        return {
+          content: [{ type: 'text' as const, text: `force_reset_watcher complete. New state: ${status.state}. PID: ${status.pid ?? 'N/A'}.` }],
+          isError: false,
+        };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: 'text' as const, text: `force_reset_watcher failed: ${msg}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  s.tool(
+    'diagnose_mcp_state',
+    "Read-only diagnostic dump for when something feels off with the MCP. Returns: launcher lifecycle state, process liveness, watcher heartbeat age, pending command queue depth, orphan result file count, last watcher_error.txt contents, plus a human-readable interpretation telling you whether the state is healthy / stalled / process-died / recovering. Use this BEFORE force_reset_watcher so you know whether the reset is actually needed (vs. e.g. a long-running command in flight).",
+    async () => {
+      if (!launcher) {
+        return {
+          content: [{ type: 'text' as const, text: 'No launcher instance available (server is in headless mode).' }],
+          isError: false,
+        };
+      }
+      const d = await launcher.diagnose();
+      const lines: string[] = [];
+      lines.push(`=== MCP DIAGNOSTIC STATE ===`);
+      lines.push(`Launcher state: ${d.status.state}`);
+      lines.push(`Process alive: ${d.isProcessAlive ? 'yes' : 'no'} (PID ${d.status.pid ?? 'N/A'})`);
+      lines.push(`Started: ${d.status.startedAt ? new Date(d.status.startedAt).toISOString() : 'N/A'}`);
+      if (d.status.heartbeatAgeSeconds === null || d.status.heartbeatAgeSeconds === undefined) {
+        lines.push(`Heartbeat: never (no heartbeat.signal exists)`);
+      } else {
+        lines.push(`Heartbeat: ${d.status.heartbeatAgeSeconds.toFixed(1)}s old`);
+      }
+      if (d.queueDepth) {
+        lines.push(`Pending commands: ${d.queueDepth.pendingCommands}`);
+        lines.push(`Orphan results: ${d.queueDepth.orphanResults}`);
+      }
+      if (d.status.lastError) {
+        lines.push(`Last error: ${d.status.lastError}`);
+      }
+      if (d.watcherErrorLog) {
+        lines.push(`--- watcher_error.txt ---`);
+        const trimmed = d.watcherErrorLog.length > 2000
+          ? '...(truncated)...\n' + d.watcherErrorLog.slice(-2000)
+          : d.watcherErrorLog;
+        lines.push(trimmed);
+        lines.push(`--- end watcher_error.txt ---`);
+      }
+      lines.push(`Interpretation: ${d.interpretation}`);
+      return {
+        content: [{ type: 'text' as const, text: lines.join('\n') }],
         isError: false,
       };
     }
@@ -2052,6 +2137,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   if (launcher && config.autoLaunch) {
     const persistentLauncher = launcher;
+    const persistentResilient = resilientLauncher!;
     serverLog.info('Auto-launching CODESYS in the background...');
     // Hand the proxy a readiness promise so tool calls during the launch
     // window block on it before delegating - no race between swap and
@@ -2075,7 +2161,9 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         throw err;
       }
     );
-    executor.swap(persistentLauncher, launchReady);
+    // Pass the resilient wrapper, not the raw launcher, so command timeouts
+    // trigger auto-recovery via forceReset() transparently.
+    executor.swap(persistentResilient, launchReady);
   }
 
   // ─── Graceful Shutdown ───────────────────────────────────────────────

@@ -16,6 +16,121 @@
  * Calls that started before swap() finish on whichever inner they snapshotted.
  */
 import { IpcResult, ScriptExecutor } from './types';
+import { launcherLog } from './logger';
+
+/**
+ * Interface for executors that support a force-reset recovery operation.
+ * The CODESYS launcher implements this; HeadlessExecutor does not (each
+ * headless call spawns its own CODESYS instance, so there is no persistent
+ * state to reset).
+ */
+export interface ResettableExecutor extends ScriptExecutor {
+  forceReset(): Promise<void>;
+}
+
+/**
+ * Wraps a ResettableExecutor with auto-recovery on watcher lockups.
+ *
+ * Failure mode this exists for: the watcher inside CODESYS goes silent for
+ * reasons we cannot detect from the script side -- background worker thread
+ * dies, primary UI thread hits a CLR deadlock, GC stall, etc. The user
+ * symptom is "MCP locked, I have to restart AB". The 30s heartbeat staleness
+ * check in the launcher catches most of these, but the timeout path
+ * (command never returns) is the canonical signal.
+ *
+ * Recovery policy:
+ *   - On the first command timeout: assume it's a long-running operation,
+ *     re-throw immediately so the caller sees the timeout error.
+ *   - On a second consecutive timeout: assume watcher is genuinely stuck,
+ *     call forceReset() (kill CODESYS, clean IPC, relaunch) and retry the
+ *     command ONCE on the fresh watcher.
+ *   - Successful calls reset the consecutive-timeout counter.
+ *
+ * We do NOT auto-reset on the first timeout because legitimate slow
+ * operations (cold project open, big compile) can exceed the configured
+ * commandTimeoutMs. The "two strikes" policy avoids fighting the user when
+ * the timeout is just too tight.
+ */
+export class ResilientExecutor implements ResettableExecutor {
+  private consecutiveTimeouts = 0;
+  // While a reset is in flight, do not start another one. New calls wait
+  // for this promise to settle (or proceed normally if null).
+  private resetInFlight: Promise<void> | null = null;
+
+  constructor(private inner: ResettableExecutor) {}
+
+  async executeScript(content: string, timeoutMs?: number): Promise<IpcResult> {
+    // If a reset is currently in progress, wait for it to finish before
+    // sending a new command. The new command runs against the fresh watcher.
+    if (this.resetInFlight) {
+      try { await this.resetInFlight; } catch { /* reset failed; surface via next call */ }
+    }
+    try {
+      const result = await this.inner.executeScript(content, timeoutMs);
+      // Command returned (success or in-script error) -- the watcher is alive,
+      // reset the consecutive-timeout counter.
+      this.consecutiveTimeouts = 0;
+      return result;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const isTimeout = /timed out after \d+ms/i.test(msg);
+      if (!isTimeout) {
+        // Not a timeout -- propagate without touching the counter.
+        throw err;
+      }
+
+      this.consecutiveTimeouts++;
+      launcherLog.warn(
+        `ResilientExecutor: command timed out (consecutive=${this.consecutiveTimeouts})`
+      );
+
+      if (this.consecutiveTimeouts < 2) {
+        // First timeout -- could be a legitimate slow operation. Re-throw
+        // and let the caller decide whether to retry.
+        throw err;
+      }
+
+      // Two timeouts in a row -- assume watcher is locked. Reset and retry once.
+      // Guard against concurrent resets if multiple in-flight calls all time out.
+      if (!this.resetInFlight) {
+        launcherLog.warn(
+          `ResilientExecutor: 2 consecutive timeouts -- triggering forceReset() and retrying.`
+        );
+        this.resetInFlight = this.inner.forceReset()
+          .then(() => {
+            // Reset succeeded. Clear counter so retries don't immediately
+            // trigger another reset on transient slowness post-recovery.
+            this.consecutiveTimeouts = 0;
+          })
+          .finally(() => {
+            this.resetInFlight = null;
+          });
+      }
+      try {
+        await this.resetInFlight;
+      } catch (resetErr) {
+        const rmsg = resetErr instanceof Error ? resetErr.message : String(resetErr);
+        throw new Error(
+          `Watcher appeared locked (2 consecutive timeouts). Auto-recovery via ` +
+          `forceReset() also failed: ${rmsg}. Original timeout: ${msg}.`
+        );
+      }
+      // Retry the command on the fresh watcher.
+      launcherLog.info(`ResilientExecutor: retrying command after successful reset.`);
+      return this.inner.executeScript(content, timeoutMs);
+    }
+  }
+
+  /** Pass-through reset for callers that have a ResettableExecutor reference. */
+  async forceReset(): Promise<void> {
+    if (this.resetInFlight) {
+      return this.resetInFlight;
+    }
+    this.resetInFlight = this.inner.forceReset()
+      .finally(() => { this.resetInFlight = null; });
+    return this.resetInFlight;
+  }
+}
 
 export class ExecutorProxy implements ScriptExecutor {
   private inner: ScriptExecutor;

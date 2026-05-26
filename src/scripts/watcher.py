@@ -18,7 +18,17 @@ IPC_BASE_DIR = "{IPC_BASE_DIR}"
 COMMANDS_DIR = os.path.join(IPC_BASE_DIR, "commands")
 RESULTS_DIR = os.path.join(IPC_BASE_DIR, "results")
 POLL_INTERVAL = 50  # milliseconds
-WATCHER_VERSION = "0.3.0"
+# Heartbeat: the background worker rewrites heartbeat.signal every N iterations
+# of its loop, even when idle. The Node side reads the file mtime to detect
+# silent watcher death / primary-thread deadlock without waiting for a 60-600s
+# command timeout. With POLL_INTERVAL=50ms, HEARTBEAT_EVERY=100 gives a 5s
+# refresh cadence which is well within the 30s "stalled" threshold.
+HEARTBEAT_EVERY = 100  # loop iterations between heartbeat refreshes
+# Stale-file sweep: at startup, remove .result.json files older than this many
+# seconds. Protects against orphan results from a previous crashed session
+# polluting the directory.
+STALE_RESULT_MAX_AGE_S = 3600.0  # 1 hour
+WATCHER_VERSION = "0.4.0"
 
 # --- Error capture file (written before anything else can fail) ---
 _ERROR_FILE = os.path.join(IPC_BASE_DIR, "watcher_error.txt")
@@ -75,6 +85,40 @@ try:
                         raise
                     time.sleep(0.05 * (attempt + 1))
 
+    # --- Stale file cleanup at startup ---
+    # Orphan .result.json from a previous crashed session would never be read
+    # (the requestId won't match the new session's UUIDs) but accumulating
+    # them slows os.listdir(). Remove anything older than STALE_RESULT_MAX_AGE_S.
+    # Best-effort; failures here must NOT block the ready signal.
+    try:
+        now_ts = time.time()
+        stale_removed = 0
+        for fn in os.listdir(RESULTS_DIR):
+            fp = os.path.join(RESULTS_DIR, fn)
+            try:
+                if os.path.getmtime(fp) < now_ts - STALE_RESULT_MAX_AGE_S:
+                    os.remove(fp)
+                    stale_removed += 1
+            except Exception:
+                pass
+        # Also sweep orphan .command.json from a previous session that we
+        # MUST NOT process (they reference scriptPath from a dead session).
+        for fn in os.listdir(COMMANDS_DIR):
+            if fn.endswith(".command.json"):
+                fp = os.path.join(COMMANDS_DIR, fn)
+                try:
+                    # Anything older than 1 minute at startup is definitely
+                    # orphan (commands are normally processed in <2 min).
+                    if os.path.getmtime(fp) < now_ts - 60.0:
+                        os.remove(fp)
+                        stale_removed += 1
+                except Exception:
+                    pass
+        if stale_removed:
+            _write_error("Stale cleanup removed %d orphan files at startup." % stale_removed)
+    except Exception as cleanup_err:
+        _write_error("Stale cleanup raised (ignored): %s" % cleanup_err)
+
     # --- Write ready signal EARLY (before .NET imports) ---
     ready_path = os.path.join(IPC_BASE_DIR, "ready.signal")
     info = {
@@ -87,6 +131,9 @@ try:
     }
     atomic_write(ready_path, json.dumps(info, indent=2))
     print("[WATCHER] Ready signal written to %s" % ready_path)
+
+    # --- Heartbeat path: refreshed by the worker loop ---
+    HEARTBEAT_PATH = os.path.join(IPC_BASE_DIR, "heartbeat.signal")
 
     # --- Import .NET threading (after ready signal) ---
     _write_error("About to import clr")
@@ -267,19 +314,49 @@ try:
             pass
 
 
+    def _write_heartbeat():
+        """Write/rewrite the heartbeat file. Uses a cheap timestamp-only payload
+        so the Node side can read it without parsing JSON (we use mtime), but
+        the body is informative for manual debugging."""
+        try:
+            payload = '{"ts": %.3f, "pid": %d, "version": "%s"}\n' % (
+                time.time(), os.getpid(), WATCHER_VERSION)
+            # Direct write (no atomic rename) -- mtime accuracy matters more
+            # than atomic content; the Node side only reads mtime for staleness.
+            with open(HEARTBEAT_PATH, 'wb') as hbf:
+                hbf.write(payload.encode('utf-8') if isinstance(payload, unicode) else payload)
+        except Exception:
+            # A failed heartbeat write is itself a sign of trouble, but we
+            # MUST NOT raise from the worker loop -- the per-iteration except
+            # will catch it.
+            pass
+
     def worker():
         _log("Background worker started")
+        # Write the first heartbeat immediately so the Node side has a baseline.
+        _write_heartbeat()
+        loop_count = 0
         while not _stop_event.WaitOne(POLL_INTERVAL):
             try:
                 if os.path.exists(os.path.join(IPC_BASE_DIR, "terminate.signal")):
                     _log("Terminate signal received")
                     break
+                # Refresh heartbeat every HEARTBEAT_EVERY iterations (5s at
+                # POLL_INTERVAL=50ms). This proves the worker is alive even
+                # when no commands are pending -- the file's mtime is what
+                # the Node-side health check reads.
+                loop_count += 1
+                if loop_count % HEARTBEAT_EVERY == 0:
+                    _write_heartbeat()
                 cmd_files = sorted([
                     f for f in os.listdir(COMMANDS_DIR)
                     if f.endswith(".command.json")
                 ])
                 if cmd_files:
                     process_command(cmd_files[0])
+                    # Also refresh after a command completes so a long-running
+                    # command followed by idle doesn't flag stalled.
+                    _write_heartbeat()
             except Exception as e:
                 _log("Worker error: %s" % e)
         _log("Background worker stopped")

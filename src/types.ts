@@ -21,8 +21,17 @@ export interface IpcResult {
   timestamp: number;
 }
 
-/** CODESYS process lifecycle state */
-export type CodesysState = 'stopped' | 'launching' | 'ready' | 'stopping' | 'error';
+/**
+ * CODESYS process lifecycle state.
+ *
+ * 'stalled' is a sub-state of 'ready' from the OS perspective (the CODESYS
+ * process is still alive) but the watcher hasn't refreshed heartbeat.signal
+ * recently, indicating either the worker thread died or the primary UI
+ * thread is deadlocked. The only recovery is force_reset_watcher (kill +
+ * relaunch). This state is surfaced so the agent knows to call reset
+ * instead of waiting for commands to time out.
+ */
+export type CodesysState = 'stopped' | 'launching' | 'ready' | 'stalled' | 'stopping' | 'error';
 
 /** Configuration for launching CODESYS */
 export interface LauncherConfig {
@@ -60,6 +69,16 @@ export interface LauncherStatus {
   ipcDir: string | null;
   startedAt: number | null;
   lastError: string | null;
+  /**
+   * Age (in seconds) of the watcher's heartbeat.signal file at the time
+   * getStatus() was called. null if no heartbeat file exists yet (cold
+   * launch in progress) or if the launcher has no IPC client.
+   *
+   * A heartbeat age above ~30s while state is 'ready' usually indicates
+   * the worker thread or primary UI thread is stuck. The launcher's health
+   * monitor flips state to 'stalled' when this happens.
+   */
+  heartbeatAgeSeconds?: number | null;
 }
 
 /** IPC transport configuration */

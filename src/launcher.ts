@@ -18,6 +18,14 @@ const DEFAULT_READY_TIMEOUT_MS = 60_000;
 const READY_POLL_MS = 500;
 const SHUTDOWN_WAIT_MS = 5_000;
 const HEALTH_CHECK_INTERVAL_MS = 5_000;
+/**
+ * Heartbeat age (seconds) above which the launcher transitions to 'stalled'.
+ * The watcher writes heartbeat.signal every ~5s when the worker thread is
+ * alive. 30s gives plenty of slack for a long-running command on the primary
+ * thread (which suspends heartbeat refresh) without false positives, but is
+ * still much faster than the 60-600s command timeout.
+ */
+const HEARTBEAT_STALL_THRESHOLD_S = 30;
 
 export class CodesysLauncher implements ScriptExecutor {
   private config: LauncherConfig;
@@ -258,7 +266,16 @@ sys.exit(0)
 
   /** Execute a script through the IPC channel */
   async executeScript(content: string, timeoutMs?: number): Promise<IpcResult> {
-    if (this.state !== 'ready' || !this.ipcClient) {
+    if (!this.ipcClient) {
+      throw new Error(`Cannot execute script: launcher state is '${this.state}'`);
+    }
+    if (this.state === 'stalled') {
+      throw new Error(
+        `Cannot execute script: launcher state is 'stalled' (watcher heartbeat stale). ` +
+        `Call force_reset_watcher to recover, then retry.`
+      );
+    }
+    if (this.state !== 'ready') {
       throw new Error(`Cannot execute script: launcher state is '${this.state}'`);
     }
     return this.ipcClient.sendCommand(content, timeoutMs);
@@ -343,7 +360,69 @@ sys.exit(0)
       ipcDir: this.ipcDir,
       startedAt: this.startedAt,
       lastError: this.lastError,
+      // heartbeatAgeSeconds is filled by getStatusAsync(); the sync version
+      // omits it to keep getStatus() side-effect-free.
     };
+  }
+
+  /**
+   * Async variant of getStatus() that also reads the heartbeat file age.
+   * Used by diagnose_mcp_state and get_codesys_status to surface watcher
+   * liveness independent of the cached state field.
+   */
+  async getStatusAsync(): Promise<LauncherStatus> {
+    const base = this.getStatus();
+    if (this.ipcClient) {
+      try {
+        base.heartbeatAgeSeconds = await this.ipcClient.getHeartbeatAgeSeconds();
+      } catch {
+        base.heartbeatAgeSeconds = null;
+      }
+    } else {
+      base.heartbeatAgeSeconds = null;
+    }
+    return base;
+  }
+
+  /**
+   * Diagnostic dump for diagnose_mcp_state tool. Returns runtime state +
+   * filesystem evidence about what the watcher is/isn't doing. Read-only;
+   * does not modify any state.
+   */
+  async diagnose(): Promise<{
+    status: LauncherStatus;
+    queueDepth: { pendingCommands: number; orphanResults: number } | null;
+    watcherErrorLog: string | null;
+    isProcessAlive: boolean;
+    interpretation: string;
+  }> {
+    const status = await this.getStatusAsync();
+    const isProcessAlive = this.isRunning();
+    let queueDepth: { pendingCommands: number; orphanResults: number } | null = null;
+    let watcherErrorLog: string | null = null;
+    if (this.ipcClient) {
+      try { queueDepth = await this.ipcClient.getQueueDepth(); } catch { /* ignore */ }
+      try { watcherErrorLog = await this.ipcClient.readWatcherErrorLog(); } catch { /* ignore */ }
+    }
+
+    // Build a human-readable interpretation so the agent can decide whether
+    // to call force_reset_watcher without parsing the raw numbers.
+    let interpretation: string;
+    if (!isProcessAlive && status.state !== 'stopped' && status.state !== 'launching') {
+      interpretation = 'CODESYS process is dead but launcher state is not stopped -- call launch_codesys to recover.';
+    } else if (status.state === 'stalled') {
+      interpretation = `Watcher heartbeat stale (age=${status.heartbeatAgeSeconds?.toFixed(1)}s). Worker thread died or primary UI thread is deadlocked. Call force_reset_watcher to recover.`;
+    } else if (status.state === 'ready' && status.heartbeatAgeSeconds !== null && status.heartbeatAgeSeconds !== undefined && status.heartbeatAgeSeconds > HEARTBEAT_STALL_THRESHOLD_S) {
+      interpretation = `Watcher heartbeat appears stale (age=${status.heartbeatAgeSeconds.toFixed(1)}s) but state is still 'ready' -- health monitor will flip to stalled shortly. Either wait or call force_reset_watcher.`;
+    } else if (status.state === 'ready' && queueDepth && queueDepth.pendingCommands > 5) {
+      interpretation = `Commands are backing up (${queueDepth.pendingCommands} pending) -- watcher may be slow or recovering from a stall. If a single command takes >2 min something is wrong; call force_reset_watcher.`;
+    } else if (status.state === 'ready') {
+      interpretation = 'Healthy.';
+    } else {
+      interpretation = `Launcher state is '${status.state}'. See lastError for details.`;
+    }
+
+    return { status, queueDepth, watcherErrorLog, isProcessAlive, interpretation };
   }
 
   /** Check if the CODESYS process is still alive */
@@ -374,16 +453,120 @@ sys.exit(0)
   }
 
   private startHealthMonitor(): void {
-    this.healthInterval = setInterval(() => {
-      if (this.state === 'ready' && !this.isRunning()) {
+    this.healthInterval = setInterval(async () => {
+      // Pre-existing check: did the CODESYS process die outright?
+      if ((this.state === 'ready' || this.state === 'stalled') && !this.isRunning()) {
         launcherLog.error('Health check: CODESYS process died');
         this.lastError = 'CODESYS process died unexpectedly';
         this.pid = null;
         this.process = null;
         this.setState('error');
         this.stopHealthMonitor();
+        return;
+      }
+      // New: watcher heartbeat staleness check. The process is alive but
+      // the worker thread isn't refreshing heartbeat.signal -- typical
+      // symptoms are primary-thread deadlock (long script hang) or worker
+      // thread crash. We surface this as 'stalled' so callers know to
+      // force_reset_watcher; we do NOT auto-reset here because the user
+      // may have a long manual operation in progress they don't want killed.
+      if (this.state === 'ready' && this.ipcClient) {
+        try {
+          const ageS = await this.ipcClient.getHeartbeatAgeSeconds();
+          if (ageS !== null && ageS > HEARTBEAT_STALL_THRESHOLD_S) {
+            launcherLog.warn(
+              `Health check: watcher heartbeat is ${ageS.toFixed(1)}s old ` +
+              `(threshold ${HEARTBEAT_STALL_THRESHOLD_S}s) -- flipping state to stalled.`
+            );
+            this.lastError =
+              `Watcher heartbeat stale: ${ageS.toFixed(1)}s old. ` +
+              `Worker thread died or primary UI thread is deadlocked. ` +
+              `Call force_reset_watcher to recover.`;
+            this.setState('stalled');
+          }
+        } catch (err) {
+          launcherLog.debug(`Heartbeat check failed (ignored): ${err}`);
+        }
+      }
+      // Recovery direction: if state was 'stalled' and heartbeat is now
+      // fresh again, flip back to 'ready'. This handles the rare case
+      // where a long-running command completes and the worker resumes
+      // heartbeat updates.
+      if (this.state === 'stalled' && this.ipcClient) {
+        try {
+          const ageS = await this.ipcClient.getHeartbeatAgeSeconds();
+          if (ageS !== null && ageS <= HEARTBEAT_STALL_THRESHOLD_S) {
+            launcherLog.info(
+              `Health check: heartbeat recovered (age=${ageS.toFixed(1)}s) -- flipping back to ready.`
+            );
+            this.lastError = null;
+            this.setState('ready');
+          }
+        } catch { /* ignore */ }
       }
     }, HEALTH_CHECK_INTERVAL_MS);
+  }
+
+  /**
+   * Force-reset: kill the CODESYS process, clean up the IPC directory,
+   * then re-launch. Equivalent to shutdown_codesys() + launch_codesys()
+   * but in a single call with stale-file cleanup in between.
+   *
+   * Recovery path for: silent watcher death, primary-thread deadlock,
+   * or any other state where commands stop returning. Does NOT save
+   * any open project (the project is already in an unknown state if the
+   * watcher hit a deadlock; we'd risk corrupting it by trying to save).
+   */
+  async forceReset(): Promise<void> {
+    launcherLog.warn(`forceReset() called -- killing process and re-launching. State was: ${this.state}`);
+
+    // Best-effort: send terminate so a non-stalled watcher exits cleanly.
+    // We give it a short window because if it WAS stalled the signal will
+    // never be read.
+    if (this.ipcClient) {
+      try { await this.ipcClient.sendTerminate(); } catch { /* ignore */ }
+    }
+
+    // Stop health monitor so it doesn't fight the state transitions below.
+    this.stopHealthMonitor();
+    this.setState('stopping');
+
+    // Kill the process. Skip the graceful "quit script" attempt that
+    // shutdown() does -- the whole point of forceReset() is "process is
+    // not responding, kill it hard". We still try /F /T (force tree)
+    // first via taskkill on Windows.
+    if (this.pid !== null) {
+      if (process.platform === 'win32') {
+        const { execSync } = require('child_process');
+        try {
+          execSync(`taskkill /F /T /PID ${this.pid}`, { timeout: 10_000, stdio: 'ignore' });
+        } catch { /* process may already be gone */ }
+      } else if (this.process) {
+        try { this.process.kill('SIGKILL'); } catch { /* ignore */ }
+      }
+      // Wait briefly for the OS to reap the PID.
+      const waitStart = Date.now();
+      while (Date.now() - waitStart < 5_000 && this.isRunning()) {
+        await this.sleep(200);
+      }
+    }
+
+    // Clean up the IPC dir for the dead session.
+    if (this.ipcClient) {
+      try { await this.ipcClient.cleanup(); } catch { /* ignore */ }
+    }
+    this.pid = null;
+    this.process = null;
+    this.ipcClient = null;
+    this.startedAt = null;
+    this.setState('stopped');
+    this.lastError = null;
+
+    launcherLog.info('forceReset(): killed previous session, now re-launching');
+
+    // Re-launch. This goes through the normal launch() path and will
+    // create a fresh session dir, watcher.py, and ready.signal cycle.
+    await this.launch();
   }
 
   private stopHealthMonitor(): void {
