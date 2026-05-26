@@ -336,6 +336,93 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
     }
   );
 
+  s.tool(
+    'set_project_info',
+    "Updates the Project Information node (Title / Version / Author / Company / Description). Mirrors the AB UI menu 'Project > Project Information'. Pass only the fields you want to change; omitted fields are left untouched. Saves the project after applying changes. Useful for automated version bumps in CI/CD pipelines that maintain a library's auto-generated GetVersion() POU.",
+    {
+      projectFilePath: z.string().describe("Path to the project file."),
+      version: z.string().describe("Project version. Format: 'MAJOR.MINOR.SERVICEPACK[.BUILD]', e.g. '1.0.5' or '1.0.5.42'.").optional(),
+      title: z.string().describe("Project title.").optional(),
+      author: z.string().describe("Project author.").optional(),
+      company: z.string().describe("Project company.").optional(),
+      description: z.string().describe("Project description (multi-line allowed).").optional(),
+    },
+    async (args: { projectFilePath: string; version?: string; title?: string; author?: string; company?: string; description?: string }) => {
+      const escaped = resolvePath(args.projectFilePath, workspaceDir);
+      const provided = [
+        args.version !== undefined ? 'version' : '',
+        args.title !== undefined ? 'title' : '',
+        args.author !== undefined ? 'author' : '',
+        args.company !== undefined ? 'company' : '',
+        args.description !== undefined ? 'description' : '',
+      ].filter(Boolean);
+      if (provided.length === 0) {
+        return {
+          content: [{ type: 'text' as const, text: 'Error: at least one of version/title/author/company/description must be provided.' }],
+          isError: true,
+        };
+      }
+      const script = scriptManager.prepareScriptWithHelpers(
+        'set_project_info',
+        {
+          PROJECT_FILE_PATH: escaped,
+          VERSION: args.version ?? '',
+          TITLE: args.title ?? '',
+          AUTHOR: args.author ?? '',
+          COMPANY: args.company ?? '',
+          DESCRIPTION: args.description ?? '',
+        },
+        ['_text_utils', 'ensure_project_open']
+      );
+      const result = await executor.executeScript(script);
+      return formatToolResponse(
+        result,
+        `Project Information updated (fields: ${provided.join(', ')}) on ${args.projectFilePath}.`
+      );
+    }
+  );
+
+  s.tool(
+    'get_project_info',
+    "Reads the Project Information node fields (version, title, author, company, description). Returns a JSON object with the present fields. Mirrors what is shown in the AB UI menu 'Project > Project Information'.",
+    {
+      projectFilePath: z.string().describe("Path to the project file."),
+    },
+    async (args: { projectFilePath: string }) => {
+      const escaped = resolvePath(args.projectFilePath, workspaceDir);
+      const script = scriptManager.prepareScriptWithHelpers(
+        'get_project_info',
+        { PROJECT_FILE_PATH: escaped },
+        ['_text_utils', 'ensure_project_open']
+      );
+      const result = await executor.executeScript(script);
+      return formatToolResponse(result, `Project Information read for ${args.projectFilePath}.`);
+    }
+  );
+
+  s.tool(
+    'close_project',
+    "Closes the currently open primary CODESYS project so that another project can be opened. Saves first unless 'force' is true. No-op if no project is currently open. Use this when switching between a library project and a consumer project to avoid the ~30-60s shutdown_codesys/launch_codesys cycle.",
+    {
+      projectFilePath: z.string().describe("Path to the project file expected to be open (used only for diagnostics; the tool closes whichever project is the current primary)."),
+      force: z.boolean().describe("If true, skip saving and discard unsaved changes. Default false (saves first).").optional(),
+    },
+    async (args: { projectFilePath: string; force?: boolean }) => {
+      const escaped = resolvePath(args.projectFilePath, workspaceDir);
+      const script = scriptManager.prepareScript('close_project', {
+        PROJECT_FILE_PATH: escaped,
+        FORCE: args.force ? 'true' : 'false',
+      });
+      const result = await executor.executeScript(script);
+      return formatToolResponse(
+        result,
+        args.force
+          ? `Project closed (force=true, unsaved changes discarded): ${args.projectFilePath}`
+          : `Project saved and closed: ${args.projectFilePath}`
+      );
+    }
+  );
+
   // ─── POU Tools ───────────────────────────────────────────────────────
 
   s.tool(
@@ -1434,6 +1521,76 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
   );
 
   s.tool(
+    'get_task_configuration',
+    "Lists every Task Configuration node in the project with its child tasks and their current properties (cycle time, priority, watchdog, stack size where exposed). Library projects have no Task Configuration -- this tool is for application/consumer projects (typically PLC_AC500_V3 / Plc Logic / Application / Task Configuration).",
+    {
+      projectFilePath: z.string().describe("Path to the project file."),
+    },
+    async (args: { projectFilePath: string }) => {
+      const escaped = resolvePath(args.projectFilePath, workspaceDir);
+      const script = scriptManager.prepareScriptWithHelpers(
+        'get_task_configuration',
+        { PROJECT_FILE_PATH: escaped },
+        ['_text_utils', 'ensure_project_open']
+      );
+      const result = await executor.executeScript(script);
+      return formatToolResponse(result, `Task configuration read for ${args.projectFilePath}.`);
+    }
+  );
+
+  s.tool(
+    'set_task_parameter',
+    "Updates one or more properties of a Task (cycle time, priority, watchdog time, stack size). Pass only the knobs you want to change; others are left untouched. Saves the project after applying. For AC500 V3 stack size: when set at task level fails, the script walks up to ancestor nodes; AC500 may store PLC stack config via Device parameter dict instead -- in that case use set_device_parameter once the parameter id is known (set_device_parameter does NOT auto-discover it; consult AB UI Device > PLC Settings).",
+    {
+      projectFilePath: z.string().describe("Path to the project file."),
+      taskName: z.string().min(1).describe("Exact name of the task as shown under Task Configuration (e.g. 'MainTask'). Use get_task_configuration to discover."),
+      cycleTimeMs: z.number().int().positive().describe("Cycle time / interval in milliseconds.").optional(),
+      watchdogTimeMs: z.number().int().positive().describe("Watchdog timeout in milliseconds. Setting it also enables the watchdog if a toggle is exposed.").optional(),
+      priority: z.number().int().min(0).max(31).describe("Task priority (0 = highest, 31 = lowest on AC500 V3).").optional(),
+      stackSizeBytes: z.number().int().positive().describe("Stack size in bytes. Required when a library has large STRING(N) buffers that overflow the default ~128KB stack; common bump is 262144 (256KB).").optional(),
+    },
+    async (args: {
+      projectFilePath: string;
+      taskName: string;
+      cycleTimeMs?: number;
+      watchdogTimeMs?: number;
+      priority?: number;
+      stackSizeBytes?: number;
+    }) => {
+      const provided = [
+        args.cycleTimeMs !== undefined ? 'cycleTimeMs' : '',
+        args.watchdogTimeMs !== undefined ? 'watchdogTimeMs' : '',
+        args.priority !== undefined ? 'priority' : '',
+        args.stackSizeBytes !== undefined ? 'stackSizeBytes' : '',
+      ].filter(Boolean);
+      if (provided.length === 0) {
+        return {
+          content: [{ type: 'text' as const, text: 'Error: at least one of cycleTimeMs / watchdogTimeMs / priority / stackSizeBytes must be provided.' }],
+          isError: true,
+        };
+      }
+      const escaped = resolvePath(args.projectFilePath, workspaceDir);
+      const script = scriptManager.prepareScriptWithHelpers(
+        'set_task_parameter',
+        {
+          PROJECT_FILE_PATH: escaped,
+          TASK_NAME: args.taskName.trim(),
+          CYCLE_TIME_MS: args.cycleTimeMs !== undefined ? String(args.cycleTimeMs) : '',
+          WATCHDOG_TIME_MS: args.watchdogTimeMs !== undefined ? String(args.watchdogTimeMs) : '',
+          PRIORITY: args.priority !== undefined ? String(args.priority) : '',
+          STACK_SIZE_BYTES: args.stackSizeBytes !== undefined ? String(args.stackSizeBytes) : '',
+        },
+        ['_text_utils', 'ensure_project_open']
+      );
+      const result = await executor.executeScript(script);
+      return formatToolResponse(
+        result,
+        `Task '${args.taskName}' updated (${provided.join(', ')}) in ${args.projectFilePath}.`
+      );
+    }
+  );
+
+  s.tool(
     'find_references',
     'Find every word-boundary reference to a symbol (\\bsymbol\\b) across textual POU/Method/Property/DUT/GVL bodies. Wraps search_code. Comments and string literals are not excluded.',
     {
@@ -1683,6 +1840,32 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       return formatToolResponse(
         result,
         `Library '${args.libraryName}' added to ${args.projectFilePath}. Project saved.`
+      );
+    }
+  );
+
+  s.tool(
+    'install_library_to_repository',
+    "Installs the currently open .library project into the CODESYS Library Repository, equivalent to the UI menu 'File > Save Project and Install into Library Repository'. Required after editing a library project so consumer projects (referencing it via Library Manager) pick up the new version. If a library with the same name+version already exists in the repository, it is overwritten; different versions are installed alongside.",
+    {
+      libraryProjectFilePath: z.string().describe("Path to the .library project file to install."),
+      repositoryName: z.string().describe("Optional name of the target repository (e.g. 'User', 'Default'). If omitted, the script picks the User repository if available, otherwise the first repository.").optional(),
+    },
+    async (args: { libraryProjectFilePath: string; repositoryName?: string }) => {
+      const escaped = resolvePath(args.libraryProjectFilePath, workspaceDir);
+      const script = scriptManager.prepareScriptWithHelpers(
+        'install_library_to_repository',
+        {
+          PROJECT_FILE_PATH: escaped,
+          REPOSITORY_NAME: (args.repositoryName ?? '').trim(),
+        },
+        ['_text_utils', 'ensure_project_open']
+      );
+      const result = await executor.executeScript(script);
+      return formatToolResponse(
+        result,
+        `Library installed to repository: ${args.libraryProjectFilePath}` +
+        (args.repositoryName ? ` (target: ${args.repositoryName})` : '')
       );
     }
   );
