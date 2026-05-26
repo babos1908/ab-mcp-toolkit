@@ -47,24 +47,48 @@ try:
             "stackSizeBytes must be provided.")
 
     # Locate the named Task. Walk every Task Configuration node, then look for
-    # a child matching TASK_NAME (case-insensitive).
+    # a child matching TASK_NAME (case-insensitive). Same normalization as
+    # get_task_configuration: the internal node name is "TaskConfiguration"
+    # (one word, no space) while the AB UI displays it with a space.
+    def _is_task_config_name(name):
+        if not name:
+            return False
+        norm = name.strip().lower().replace(' ', '').replace('_', '')
+        return norm == 'taskconfiguration'
+
     task_obj = None
     task_configs = []
-    try:
-        for child in primary_project.get_children(True):
+
+    def _walk_for_tc(node, depth, max_depth=10):
+        if depth > max_depth:
+            return
+        try:
+            children = node.get_children(False)
+        except Exception:
+            return
+        for child in children:
             cname = getattr(child, 'get_name', lambda: '')()
-            if cname and 'task configuration' in cname.lower():
+            if _is_task_config_name(cname):
                 task_configs.append(child)
+            _walk_for_tc(child, depth + 1, max_depth)
+
+    try:
+        _walk_for_tc(primary_project, 0)
     except Exception:
         pass
 
     if not task_configs:
-        try:
-            found = primary_project.find("Task Configuration", True)
-            if found:
-                task_configs = list(found)
-        except Exception:
-            pass
+        for probe_name in ('TaskConfiguration', 'Task Configuration'):
+            try:
+                found = primary_project.find(probe_name, True)
+                if found:
+                    for f in found:
+                        if _is_task_config_name(getattr(f, 'get_name', lambda: '')()):
+                            task_configs.append(f)
+                    if task_configs:
+                        break
+            except Exception:
+                pass
 
     for tc in task_configs:
         try:
