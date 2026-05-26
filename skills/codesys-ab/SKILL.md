@@ -44,9 +44,12 @@ Una sola volta per sessione (o dopo `shutdown_codesys`). Serve all'utente per ve
 
 ### Project
 - `open_project(filePath)` → apre `.project` esistente.
+- `close_project(projectFilePath, force?)` → chiude il progetto corrente. Salva prima a meno che `force=true`. **Critico per workflow library dev**: senza, switch lib↔example richiede `shutdown_codesys` + `launch_codesys` (~30-60s). Con `close_project` lo switch è <5s.
 - `create_project(filePath)` → da template Standard.project. ⚠️ Path template hardcoded può non funzionare su AB; preferire copia di un template manuale + `open_project`.
 - `save_project(projectFilePath)` → salva.
 - `create_project_archive(projectFilePath, archivePath?, ...)` → archive `.projectarchive`.
+- `get_project_info(projectFilePath)` → legge i campi Project Information (version, title, author, company, description).
+- `set_project_info(projectFilePath, version?, title?, author?, company?, description?)` → aggiorna i campi Project Information. Sblocca version bump automatici in CI/CD (la `GetVersion()` POU auto-generata legge da qui).
 
 ### Read / Search
 - `get_all_pou_code(projectFilePath)` → bulk dump declaration+implementation di **tutti** POU/Method/Property/DUT/GVL. **Primo strumento di esplorazione**.
@@ -72,12 +75,17 @@ Una sola volta per sessione (o dopo `shutdown_codesys`). Serve all'utente per ve
 - `rename_symbol(projectFilePath, oldName, newName, ...)` → refactor.
 
 ### Build
-- `compile_project(projectFilePath)` → sincrono, ritorna `N error(s), M warning(s)`. Supporta sia **`.project`** standard (compila l'Application via `clean()` + `build()` + `generate_code()`) sia **`.library`** (Pool Objects via `check_all_pool_objects()` o fallback iterativo su `get_children`).
-- `get_compile_messages(projectFilePath)` → ultimi messaggi cached (no nuovo build).
+- `compile_project(projectFilePath)` → sincrono, ritorna `N error(s), M warning(s)`. Supporta sia **`.project`** standard (compila l'Application via `clean()` + `build()` + `generate_code()`) sia **`.library`** (Pool Objects via `check_all_pool_objects()` o fallback iterativo su `get_children`). **Category scan**: dynamic enumeration via `get_message_categories()` UNION i 3 GUID hardcoded delle categorie compile (Build / Precompile / Additional code checks), più re-enumerazione DOPO il build. Critico per library projects dove l'enumerazione dinamica può ritornare solo "Script Messages" e nascondere errori C0418/C0046 reali.
+- `get_compile_messages(projectFilePath)` → ultimi messaggi cached (no nuovo build). Stessa category scan logic di `compile_project`; funziona ora anche su library projects (prima ritornava `RuntimeError: No application found`).
 
 ### Libraries
 - `list_project_libraries(projectFilePath)` → riferimenti correnti.
 - `add_library(projectFilePath, libraryName, version?, ...)`.
+- `install_library_to_repository(libraryProjectFilePath, repositoryName?)` → installa il `.library` corrente nel CODESYS Library Repository (equivalente al menu UI "File → Save Project and Install into Library Repository"). Critico nel workflow library dev: senza, i consumer projects continuano a vedere la versione precedente. Versione+nome match → overwrite; altrimenti installazione side-by-side.
+
+### Task Configuration (AC500)
+- `get_task_configuration(projectFilePath)` → lista Task Configuration node + child tasks con cycle time, priority, watchdog, stack size correnti.
+- `set_task_parameter(projectFilePath, taskName, cycleTimeMs?, watchdogTimeMs?, priority?, stackSizeBytes?)` → modifica properties di un task. Use case: bump stack a 256KB quando una lib con buffer `STRING(32767)` causa stack overflow (~133KB vs 128KB default). Stack size può non funzionare a livello task su AC500 V3 (è su Device.parameter); il tool walka l'ancestry e ritorna hint se serve `set_device_parameter`.
 
 ### Device tree (AC500 / drives / IO)
 - `list_device_repository()` → device installabili.
@@ -87,7 +95,7 @@ Una sola volta per sessione (o dopo `shutdown_codesys`). Serve all'utente per ve
 - `map_io_channel(projectFilePath, channelPath, variableName, ...)`.
 
 ### Online / runtime (richiede PLC raggiungibile)
-- `connect_to_device(projectFilePath, devicePath, ...)`.
+- `connect_to_device(projectFilePath, devicePath, ipAddress?, gatewayName?)` → patch 2026-05-26: ora **risolve gatewayName → GUID** via communication_manager (prima rifiutava `Gateway-1` con "Guid should contain 32 digits with 4 dashes"). Include anche un priming step per ridurre "Stack empty" su AB Standard.
 - `set_credentials`, `set_simulation_mode`.
 - `disconnect_from_device`, `get_application_state`.
 - `read_variable`, `write_variable`, `monitor_variables`.
