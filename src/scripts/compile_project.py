@@ -209,6 +209,42 @@ try:
             except Exception as fallback_err:
                 print("WARN: hardcoded fallback for %s failed: %s" % (guid_str, fallback_err))
 
+    # Defensive merge: ALWAYS force-include the hardcoded compile category
+    # GUIDs in the scan list, even when dynamic enumeration succeeded.
+    # Empirical 2026-05-26 on AB 2.9 Standard against a .library project:
+    # get_message_categories() returned only "Script Messages" (1 entry),
+    # hiding Build-category errors like C0418 (String VAR_IN_OUT too short)
+    # entirely. The 3 hardcoded compile categories are stable across all
+    # CODESYS V3.5 SPxx builds we support, so adding them is safe; we de-dup
+    # by stringified-Guid so a category already enumerated isn't duplicated.
+    existing_guid_strs = set()
+    for cat_guid, _ in all_categories:
+        try:
+            existing_guid_strs.add(str(cat_guid).strip('{}').upper())
+        except Exception:
+            pass
+    forced_added = 0
+    for guid_str in COMPILE_CATEGORY_GUIDS:
+        if guid_str.upper() in existing_guid_strs:
+            continue
+        try:
+            cat_guid = script_engine.Guid('{%s}' % guid_str)
+            try:
+                cat_name = script_engine.system.get_message_category_description(cat_guid)
+            except Exception:
+                cat_name = guid_str
+            all_categories.append((cat_guid, cat_name))
+            forced_added += 1
+            print("DEBUG: force-added hardcoded compile category '%s' (guid=%s) -- "
+                  "not present in dynamic enumeration." % (cat_name, guid_str))
+        except Exception as merge_err:
+            print("WARN: could not force-add hardcoded category %s: %s" % (guid_str, merge_err))
+    if forced_added:
+        # If we had to add categories beyond the dynamic set, this is the smoking
+        # gun for a library project where the Build category plugin wasn't visible
+        # to the enumeration. Mark enum_used so the diagnostic reflects it.
+        enum_used = "dynamic+forced" if enum_used == "dynamic" else (enum_used + "+forced")
+
     print("DEBUG: %d message categories will be scanned (source: %s)"
           % (len(all_categories), enum_used))
     for idx, (cg, cn) in enumerate(all_categories):
@@ -317,6 +353,58 @@ try:
         raise TypeError(
             "Target '%s' (kind=%s) supports no known compile entry point." % (app_name, project_kind)
         )
+
+    # --- Re-enumerate categories AFTER build ---
+    # Some categories (e.g. "Memory Usage", target-specific configuration
+    # messages) are registered by the compiler the first time they emit a
+    # message in this session. Re-run get_message_categories() and merge any
+    # NEW categories into the scan list before collecting messages.
+    try:
+        post_cats = script_engine.system.get_message_categories() if hasattr(
+            script_engine.system, 'get_message_categories'
+        ) else None
+        if post_cats is not None:
+            pre_count = len(all_categories)
+            existing_guid_strs_post = set()
+            for cat_guid, _ in all_categories:
+                try:
+                    existing_guid_strs_post.add(str(cat_guid).strip('{}').upper())
+                except Exception:
+                    pass
+            for cat in post_cats:
+                cat_guid = None
+                cat_name = None
+                try:
+                    if hasattr(cat, 'guid'):
+                        cat_guid = cat.guid
+                        cat_name = getattr(cat, 'description', None) or getattr(cat, 'name', None)
+                    elif isinstance(cat, (tuple, list)) and len(cat) > 0:
+                        cat_guid = cat[0]
+                        if len(cat) > 1:
+                            cat_name = cat[1]
+                    else:
+                        cat_guid = cat
+                except Exception:
+                    pass
+                if cat_guid is None:
+                    continue
+                guid_key = str(cat_guid).strip('{}').upper()
+                if guid_key in existing_guid_strs_post:
+                    continue
+                if cat_name is None:
+                    try:
+                        cat_name = script_engine.system.get_message_category_description(cat_guid)
+                    except Exception:
+                        cat_name = str(cat_guid)
+                all_categories.append((cat_guid, cat_name))
+                existing_guid_strs_post.add(guid_key)
+                print("DEBUG: post-build enumeration added category '%s' (guid=%s)"
+                      % (cat_name, cat_guid))
+            added_post = len(all_categories) - pre_count
+            if added_post:
+                print("DEBUG: post-build re-enumeration added %d new categories." % added_post)
+    except Exception as post_enum_err:
+        print("WARN: post-build get_message_categories() failed: %s" % post_enum_err)
 
     # --- Collect messages from every compile category ---
     #
