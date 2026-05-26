@@ -1,5 +1,12 @@
 import sys, scriptengine as script_engine, os, traceback
 
+# Path of the project the caller expects to close. Used only for diagnostics --
+# the script closes whichever project is the current primary, regardless of
+# whether its path matches. We define PROJECT_FILE_PATH directly here (instead
+# of relying on the ensure_project_open helper) because close_project must NOT
+# open a project as a side-effect of running.
+PROJECT_FILE_PATH = "{PROJECT_FILE_PATH}"
+
 # Whether to discard unsaved changes. 'true' / 'false' (case-insensitive).
 FORCE_STR = "{FORCE}"
 
