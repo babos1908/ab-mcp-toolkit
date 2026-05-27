@@ -38,11 +38,15 @@ def _resolve_gateway_guid(name):
             break
 
     if gateway_manager is None:
-        # If no manager is present we have nothing to resolve. Return the
-        # input verbatim so set_gateway_and_address can still be tried.
+        # If no manager is present we have nothing to resolve. Return None so
+        # the caller knows to SKIP set_gateway_and_address entirely instead of
+        # passing the friendly name through (which on AB 2.9 SP19 produced a
+        # cryptic 'Guid should contain 32 digits with 4 dashes' from the
+        # downstream binding -- 2026-05-27 feedback). When skipped, online ops
+        # rely on the gateway/address already configured in the project file.
         print("WARN: No communication_manager / gateway_manager on script_engine; "
-              "passing gateway name through unchanged.")
-        return target
+              "gateway resolution unavailable -- caller should rely on existing project gateway config.")
+        return None
 
     candidates_seen = []
     gateways = None
@@ -83,10 +87,13 @@ def _resolve_gateway_guid(name):
             print("DEBUG: gateway '%s' resolved to GUID %s" % (target, gw_guid))
             return str(gw_guid) if gw_guid else target
 
-    # No match. Return the original name; the caller will get a clearer error
-    # from set_gateway_and_address if the runtime rejects it.
+    # No match. Same rationale as the no-manager branch: do NOT pass the
+    # unresolved name through, because the downstream binding expects a GUID
+    # and would throw a cryptic error. Return None so the caller skips
+    # set_gateway_and_address and relies on the existing project config.
     print("WARN: gateway '%s' not in repository. Candidates: %s" % (target, candidates_seen))
-    return target
+    print("WARN: gateway resolution unavailable -- caller should rely on existing project gateway config.")
+    return None
 
 
 def _prime_online_session(target_app=None):
@@ -182,30 +189,39 @@ try:
         # to passing the name unchanged; the error surfaced will be more
         # actionable than the generic "Guid should contain..." message.
         gw_guid_or_name = _resolve_gateway_guid(gw_input)
-        device = None
-        for child in primary_project.get_children(True):
-            if hasattr(child, 'set_gateway_and_address'):
-                device = child
-                break
-        if device is None:
-            raise RuntimeError(
-                "No device in the project supports set_gateway_and_address."
-            )
-        dev_name = getattr(device, 'get_name', lambda: '?')()
-        print("DEBUG: Setting gateway='%s' (resolved='%s') address='%s' on device '%s'" % (
-            gw_input, gw_guid_or_name, IP_ADDRESS, dev_name))
-        try:
-            device.set_gateway_and_address(gw_guid_or_name, IP_ADDRESS)
-        except Exception as sga_err:
-            # If we resolved to a GUID, this should work; if it failed with
-            # the GUID-format error, retry with the original name as a fallback
-            # (some builds want the friendly name).
-            err_text = str(sga_err)
-            if 'Guid' in err_text and gw_guid_or_name != gw_input:
-                print("DEBUG: set_gateway_and_address(GUID) raised %s; retrying with name '%s'" % (err_text, gw_input))
-                device.set_gateway_and_address(gw_input, IP_ADDRESS)
-            else:
-                raise
+        if gw_guid_or_name is None:
+            # Gateway resolution unavailable on this build (manager missing or
+            # gateway not in repository). Skip set_gateway_and_address rather
+            # than handing a non-GUID string to a binding that requires one;
+            # the project's existing gateway/address config is used instead.
+            # The caller can still proceed to create_online_application below.
+            print("DEBUG: gateway resolution unavailable; skipping set_gateway_and_address "
+                  "and relying on project-configured gateway/address.")
+        else:
+            device = None
+            for child in primary_project.get_children(True):
+                if hasattr(child, 'set_gateway_and_address'):
+                    device = child
+                    break
+            if device is None:
+                raise RuntimeError(
+                    "No device in the project supports set_gateway_and_address."
+                )
+            dev_name = getattr(device, 'get_name', lambda: '?')()
+            print("DEBUG: Setting gateway='%s' (resolved='%s') address='%s' on device '%s'" % (
+                gw_input, gw_guid_or_name, IP_ADDRESS, dev_name))
+            try:
+                device.set_gateway_and_address(gw_guid_or_name, IP_ADDRESS)
+            except Exception as sga_err:
+                # If we resolved to a GUID, this should work; if it failed with
+                # the GUID-format error, retry with the original name as a fallback
+                # (some builds want the friendly name).
+                err_text = str(sga_err)
+                if 'Guid' in err_text and gw_guid_or_name != gw_input:
+                    print("DEBUG: set_gateway_and_address(GUID) raised %s; retrying with name '%s'" % (err_text, gw_input))
+                    device.set_gateway_and_address(gw_input, IP_ADDRESS)
+                else:
+                    raise
 
     # Gap 9: try to prime the online-context stack BEFORE the first call to
     # create_online_application. Best-effort; if priming fails, the existing

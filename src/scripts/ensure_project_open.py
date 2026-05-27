@@ -104,19 +104,30 @@ def ensure_project_open(target_project_path):
             try:
                 current_project_path = os.path.normcase(os.path.abspath(primary_project.path))
                 if current_project_path == normalized_target_path:
-                    # Right project is primary; sanity-check accessibility before returning.
-                    try:
-                         _ = len(primary_project.get_children(False))
-                         project_ok = True
-                         return primary_project
-                    except Exception as access_err:
-                         print("WARN: Primary project access check failed for '%s': %s. Will attempt reopen." % (current_project_path, access_err))
-                         primary_project = None
+                    # Right project is primary -- skip the disk reopen entirely.
+                    #
+                    # Empirical 2026-05-27 on NexoPlcExample with UI Online ->
+                    # Login active: get_children(False) raised an access error
+                    # (the IDE holds the project in an "online" mode that blocks
+                    # some scripting introspection). The old code treated that
+                    # as "primary unusable" and fell through to the reopen
+                    # path, which then failed with ERR_PROJECT_LOCKED because
+                    # the .lock file is held by the UI session. The whole
+                    # workflow "MCP prep + UI Login + MCP-driven runtime ops"
+                    # broke.
+                    #
+                    # Resolution: when the path matches, the project IS the one
+                    # the caller wants. Return it without an introspection
+                    # check; the eventual operation will surface a clearer
+                    # error if the object is genuinely unusable than the
+                    # ERR_PROJECT_LOCKED path does.
+                    print("DEBUG: ensure_project_open: target is already primary at '%s'; returning without reopen." % current_project_path)
+                    return primary_project
                 else:
-                     primary_project = None
+                    primary_project = None
             except Exception as path_err:
-                 print("WARN: Could not get path of current primary project: %s. Assuming not the target." % path_err)
-                 primary_project = None
+                print("WARN: Could not get path of current primary project: %s. Assuming not the target." % path_err)
+                primary_project = None
 
         if not project_ok:
             try:

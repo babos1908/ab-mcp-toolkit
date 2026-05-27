@@ -26,9 +26,16 @@ try:
         if getattr(node, 'is_device', False):
             return 'Device'
         name_lower = (getattr(node, 'get_name', lambda: '')() or '').lower()
-        if 'library manager' in name_lower:
+        # Normalize BOTH sides (name + pattern) before matching: empirically
+        # the internal node names are spaceless ('LibraryManager',
+        # 'TaskConfiguration') while the AB UI displays them with spaces.
+        # The previous version normalized only one side and missed every
+        # match (2026-05-27 feedback: inspect_project_tree.libraries=0,
+        # tasks=0 on a project that has both).
+        normalized = name_lower.replace(' ', '').replace('_', '')
+        if 'librarymanager' in normalized:
             return 'LibraryManager'
-        if 'task configuration' in name_lower.replace(' ', '').replace('_', ''):
+        if 'taskconfiguration' in normalized:
             return 'TaskConfiguration'
         # Probe textual_declaration to distinguish POU vs DUT vs GVL.
         if hasattr(node, 'is_gvl') and getattr(node, 'is_gvl', False):
@@ -88,8 +95,16 @@ try:
             if kind == 'Device':
                 devices.append(entry)
             elif kind == 'LibraryManager':
-                # Enumerate references underneath the LM and put them in
-                # libraries_ref instead of walking them as POUs.
+                # Enumerate references underneath the LM. On AB 2.9 Standard,
+                # get_children(False) on the Library Manager often returns an
+                # empty iterator (the references aren't surfaced as ScriptObject
+                # children but as a separate ScriptLibrary collection that
+                # requires going through script_engine.librarymanager). We try
+                # the children path first and let the count surface the
+                # outcome; downstream callers should NOT assume 0 means "no
+                # libraries referenced" -- it means "scripting enumeration
+                # failed" on Standard.
+                ref_count_before = len(libraries_ref)
                 try:
                     for ref in child.get_children(False):
                         ref_name = getattr(ref, 'get_name', lambda: '')()
@@ -109,8 +124,10 @@ try:
                             u'version': _to_unicode(unicode(ref_version)) if ref_version else None,
                             u'path': _to_unicode(full_path + '/' + ref_name),
                         })
-                except Exception:
-                    pass
+                except Exception as lib_err:
+                    print("DEBUG: LibraryManager.get_children raised: %s" % lib_err)
+                if len(libraries_ref) == ref_count_before:
+                    print("DEBUG: LibraryManager '%s' yielded 0 references via get_children(False) -- this is the known Standard-edition enumeration limit." % cname)
                 # Don't recurse into LM children as POUs.
                 continue
             elif kind == 'TaskConfiguration':
@@ -139,6 +156,19 @@ try:
 
     _walk(primary_project, '', 0)
 
+    # Heuristic: did we see a LibraryManager node? If yes but libraries_ref
+    # is empty, the enumeration is the standard-edition limit (not a real
+    # "no libraries"). Annotate the response so callers know.
+    saw_library_manager = any(
+        'librarymanager' in (f.get(u'name', '') or '').lower().replace(' ', '').replace('_', '')
+        for f in folders
+    )
+    # _kind_of returns 'LibraryManager' for the node but we don't store it
+    # in folders/devices/pous etc; flag via a separate boolean and a hint.
+    counts_hint = {}
+    if len(libraries_ref) == 0:
+        counts_hint[u'libraries'] = u'enumeration_unavailable_on_this_build_or_no_library_manager_present'
+
     emit_result({
         u'projectName': _to_unicode(project_name) if project_name else None,
         u'devices': devices,
@@ -157,6 +187,7 @@ try:
             u'folders': len(folders),
             u'tasks': len(tasks),
         },
+        u'countsHint': counts_hint if counts_hint else None,
     })
     print("SCRIPT_SUCCESS: Project tree inspected.")
     sys.exit(0)

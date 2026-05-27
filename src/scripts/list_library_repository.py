@@ -87,41 +87,139 @@ try:
 
     name_filter_lower = NAME_FILTER.strip().lower() if NAME_FILTER else ''
 
-    # Iterate libraries. The shape returned by get_all_libraries() varies:
-    # may return library handles, or (library, repo) tuples. Probe.
-    all_libs = lib_mgr.get_all_libraries()
-    total_seen = 0
-    total_kept = 0
-    for entry in all_libs:
-        total_seen += 1
-        # Unpack possible shapes
-        lib_handle = entry
-        owning_repo_name = None
-        if isinstance(entry, (tuple, list)):
-            if len(entry) >= 1:
-                lib_handle = entry[0]
-            if len(entry) >= 2:
-                second = entry[1]
+    # Build the iteration pool. PRIMARY path: per-repo enumeration via
+    # repository.get_libraries() -- empirically more reliable than
+    # lib_mgr.get_all_libraries() which on AB 2.9 SP19 returned 355 entries
+    # of an opaque CategoryHandle / GUID type that had neither .name nor
+    # .get_name and produced 0 kept libraries downstream (2026-05-27).
+    #
+    # The pool is a list of (lib_handle, owning_repo_name) tuples. We try
+    # per-repo first; if that yields nothing, fall back to the legacy
+    # global enumeration.
+    pool = []
+    repo_methods_seen = []
+    if hasattr(lib_mgr, 'repositories'):
+        try:
+            repos_iter = lib_mgr.repositories
+            if callable(repos_iter):
+                repos_iter = repos_iter()
+            for r in repos_iter or []:
+                rname = None
                 for nattr in ('get_name', 'name'):
-                    if hasattr(second, nattr):
+                    if hasattr(r, nattr):
                         try:
-                            v = getattr(second, nattr)
-                            owning_repo_name = v() if callable(v) else v
+                            v = getattr(r, nattr)
+                            rname = v() if callable(v) else v
                         except Exception:
                             pass
                         break
+                rname_str = str(rname) if rname is not None else '(unknown repo)'
+                # Probe each repo for a libraries accessor.
+                got_from_this_repo = 0
+                for laccess in ('get_libraries', 'libraries', 'get_all_libraries'):
+                    if not hasattr(r, laccess):
+                        continue
+                    repo_methods_seen.append('%s.%s' % (rname_str, laccess))
+                    try:
+                        v = getattr(r, laccess)
+                        libs_iter = v() if callable(v) else v
+                        if libs_iter is None:
+                            continue
+                        for lh in libs_iter:
+                            pool.append((lh, rname_str))
+                            got_from_this_repo += 1
+                        if got_from_this_repo > 0:
+                            print("DEBUG: repo '%s' yielded %d libs via .%s" % (rname_str, got_from_this_repo, laccess))
+                            break
+                    except Exception as laerr:
+                        print("DEBUG: %s.%s raised: %s" % (rname_str, laccess, laerr))
+        except Exception as iter_err:
+            print("DEBUG: per-repo enumeration failed: %s" % iter_err)
 
-        # Extract library metadata
+    # FALLBACK: global enumeration via lib_mgr.get_all_libraries(). Kept for
+    # builds where per-repo iteration isn't exposed.
+    if not pool:
+        try:
+            all_libs = lib_mgr.get_all_libraries()
+            for entry in all_libs or []:
+                if isinstance(entry, (tuple, list)) and len(entry) >= 1:
+                    lh = entry[0]
+                    rn = None
+                    if len(entry) >= 2:
+                        second = entry[1]
+                        for nattr in ('get_name', 'name'):
+                            if hasattr(second, nattr):
+                                try:
+                                    v = getattr(second, nattr)
+                                    rn = v() if callable(v) else v
+                                except Exception:
+                                    pass
+                                break
+                    pool.append((lh, str(rn) if rn else None))
+                else:
+                    pool.append((entry, None))
+        except Exception as ge:
+            print("DEBUG: lib_mgr.get_all_libraries() fallback raised: %s" % ge)
+
+    total_seen = len(pool)
+    total_kept = 0
+    # Diagnostic: dump the first entry's shape so a 0-kept run is debuggable
+    # without recompiling. We log type + a probe of common attrs.
+    if total_seen > 0:
+        first_lh, _ = pool[0]
+        probe_attrs = ('get_name', 'name', 'version', 'get_version', 'company', 'get_company',
+                       'location', 'path', 'get_path', 'file_path', 'repository', 'identifier',
+                       'placeholder', 'effective_resolution')
+        present = [a for a in probe_attrs if hasattr(first_lh, a)]
+        print("DEBUG: first pool entry: type=%s, hasattr present=%s" % (
+            type(first_lh).__name__, present))
+
+    skipped_no_name = 0
+    for entry in pool:
+        lib_handle, owning_repo_name = entry
+
+        # Extract library metadata. Probe a broader name attribute set
+        # since AB 2.9 SP19 exposes name only on identifier/placeholder
+        # sub-objects on some builds.
         name = None
-        for nattr in ('get_name', 'name'):
+        for nattr in ('get_name', 'name', 'identifier', 'display_name'):
             if hasattr(lib_handle, nattr):
                 try:
                     v = getattr(lib_handle, nattr)
                     name = v() if callable(v) else v
                 except Exception:
                     pass
-                break
+                if name is not None:
+                    break
+        # Some builds expose lib_handle.identifier as an object with .name
+        if name is None and hasattr(lib_handle, 'identifier'):
+            try:
+                ident = lib_handle.identifier
+                if hasattr(ident, 'name'):
+                    name = ident.name
+            except Exception:
+                pass
+        # Fallback: parse from file path basename when name accessor missing
         if name is None:
+            for pattr in ('location', 'path', 'get_path', 'file_path'):
+                if hasattr(lib_handle, pattr):
+                    try:
+                        v = getattr(lib_handle, pattr)
+                        loc = v() if callable(v) else v
+                        if loc:
+                            import os as _os
+                            base = _os.path.basename(str(loc))
+                            # Strip extension (.library, .compiled-library, ...)
+                            name = _os.path.splitext(base)[0] or None
+                    except Exception:
+                        pass
+                    if name is not None:
+                        break
+        if name is None:
+            skipped_no_name += 1
+            continue
+
+        if name_filter_lower and name_filter_lower not in str(name).lower():
             continue
 
         if name_filter_lower and name_filter_lower not in str(name).lower():
@@ -199,9 +297,29 @@ try:
     for k, v in repos_by_name.items():
         output.append(v)
 
-    emit_result({u'repositories': output, u'totalLibraries': total_kept, u'totalScanned': total_seen})
-    print("Repositories: %d. Libraries kept: %d / scanned: %d (filter=%r)" % (
-        len(repos_by_name), total_kept, total_seen, name_filter_lower))
+    # Diagnostic: when skipped_no_name dominates total_seen the user wants to
+    # know WHY 0 libs surfaced (typical when the COM proxy iterator returned
+    # opaque category handles instead of library handles).
+    diag = {}
+    if skipped_no_name and total_kept == 0:
+        diag = {
+            u'note': u'All %d entries had no extractable name. Probably API-not-exposed on this build.' % skipped_no_name,
+            u'firstEntryProbe': u'see DEBUG line in tool output',
+            u'repoMethodsAttempted': [_to_unicode(x) for x in repo_methods_seen],
+        }
+
+    payload = {
+        u'repositories': output,
+        u'totalLibraries': total_kept,
+        u'totalScanned': total_seen,
+        u'skippedNoName': skipped_no_name,
+    }
+    if diag:
+        payload[u'diagnostic'] = diag
+
+    emit_result(payload)
+    print("Repositories: %d. Libraries kept: %d / scanned: %d / skipped-no-name: %d (filter=%r)" % (
+        len(repos_by_name), total_kept, total_seen, skipped_no_name, name_filter_lower))
     print("SCRIPT_SUCCESS: Library repository enumerated.")
     sys.exit(0)
 except Exception as e:
