@@ -947,6 +947,241 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
   );
 
   s.tool(
+    'create_ac500_project',
+    "Create a new AC500 V3 .project file by copying an existing clean AC500 template and optionally adding initial libraries. AB Standard does NOT ship with an AC500-specific stock template that the scripting API can use directly, so the caller provides a known-good AC500 project to use as the base (typically a vanilla NexoPlcExample.project with no user code). The template's device tree (PM5650-2ETH / PM5032 / etc) is preserved exactly. To use a different PLC model, point the templateProjectPath at a project that already targets that model.",
+    {
+      newProjectPath: z.string().min(1).describe("Path where the new .project file should be created (parent directory is auto-created)."),
+      templateProjectPath: z.string().min(1).describe("Path to an existing AC500 V3 .project file to use as the template (its device tree is preserved)."),
+      addLibraries: z.string().describe("Optional SEMICOLON-separated list of fully-qualified libraries to add (e.g. 'Standard, * (System); MQTT Client SL, 4.1.0.0 (3S - Smart Software Solutions GmbH)'). Use semicolons to avoid colliding with the commas inside library names.").optional(),
+      overwrite: z.boolean().describe("If true (default), overwrite newProjectPath if it exists.").optional(),
+    },
+    async (args: { newProjectPath: string; templateProjectPath: string; addLibraries?: string; overwrite?: boolean }) => {
+      const newPath = resolvePath(args.newProjectPath, workspaceDir);
+      const tmplPath = resolvePath(args.templateProjectPath, workspaceDir);
+      const script = scriptManager.prepareScriptWithHelpers(
+        'create_ac500_project',
+        {
+          PROJECT_FILE_PATH: tmplPath, // ensure_project_open helper sees template
+          NEW_PROJECT_PATH: newPath,
+          TEMPLATE_PROJECT_PATH: tmplPath,
+          ADD_LIBRARIES_CSV: args.addLibraries ?? '',
+          OVERWRITE: args.overwrite === false ? 'false' : 'true',
+        },
+        ['_text_utils', 'ensure_project_open']
+      );
+      const result = await executor.executeScript(script);
+      return formatStructuredResponse(result, `AC500 project created: ${args.newProjectPath}.`);
+    }
+  );
+
+  s.tool(
+    'inspect_project_tree',
+    "Return a structured JSON dump of the project tree: devices, library references (with version), POUs, GVLs, DUTs, folders, tasks. Categorization is best-effort (CODESYS scripting does not expose a stable type enum, so we infer from probed attributes). Optionally include the first 200 chars of each POU/GVL/DUT declaration for quick orientation. Replaces ad-hoc DFS walks the agent might do via get_all_pou_code+list_project_libraries+get_task_configuration in 3 separate round trips.",
+    {
+      projectFilePath: z.string().describe("Path to the project file."),
+      includeSymbols: z.boolean().describe("If true, embed first 200 chars of each POU/GVL/DUT declaration. Default false (compact dump).").optional(),
+    },
+    async (args: { projectFilePath: string; includeSymbols?: boolean }) => {
+      const escaped = resolvePath(args.projectFilePath, workspaceDir);
+      const script = scriptManager.prepareScriptWithHelpers(
+        'inspect_project_tree',
+        {
+          PROJECT_FILE_PATH: escaped,
+          INCLUDE_SYMBOLS: args.includeSymbols ? 'true' : 'false',
+        },
+        ['_text_utils', 'ensure_project_open']
+      );
+      const result = await executor.executeScript(script);
+      return formatStructuredResponse(result, `Project tree inspected for ${args.projectFilePath}.`);
+    }
+  );
+
+  s.tool(
+    'release_library_version',
+    "Orchestrate a library release in a single tool call: (1) set_project_info with the new version, (2) rebuild_library, (3) install_library_to_repository, (4) copy the .library file to distFolder/v{version}/{name}-v{version}.library, and optionally (5) `git tag` + `gh release create` against the repo. Each step is conditional and failures surface step-by-step in the returned JSON. Safer than scripting these calls manually because the steps run in the right order with shared error context.",
+    {
+      libraryProjectFilePath: z.string().describe("Path to the .library project file to release."),
+      version: z.string().min(1).describe("New version string (e.g. '1.0.11'). Format: MAJOR.MINOR.PATCH[.BUILD]."),
+      distFolder: z.string().describe("Optional path to a dist folder. The .library file is copied to {distFolder}/v{version}/{name}-v{version}.library after install.").optional(),
+      gitTag: z.boolean().describe("If true, run 'git tag v{version}' in the library's repo directory after install. Off by default.").optional(),
+      ghRelease: z.boolean().describe("If true and gitTag is also true, run 'gh release create v{version} --generate-notes' after the tag. Off by default.").optional(),
+    },
+    async (args: { libraryProjectFilePath: string; version: string; distFolder?: string; gitTag?: boolean; ghRelease?: boolean }) => {
+      const steps: Array<{ name: string; ok: boolean; detail: string }> = [];
+      const recordStep = (name: string, ok: boolean, detail: string): void => {
+        steps.push({ name, ok, detail });
+      };
+
+      const libPath = resolvePath(args.libraryProjectFilePath, workspaceDir);
+
+      // STEP 1: set_project_info(version)
+      try {
+        const script = scriptManager.prepareScriptWithHelpers(
+          'set_project_info',
+          { PROJECT_FILE_PATH: libPath, VERSION: args.version, TITLE: '', AUTHOR: '', COMPANY: '', DESCRIPTION: '' },
+          ['_text_utils', 'ensure_project_open']
+        );
+        await backupManager.snapshot(libPath);
+        const r = await executor.executeScript(script);
+        const ok = r.success && r.output.includes('SCRIPT_SUCCESS');
+        recordStep('set_project_info', ok, ok ? `version set to ${args.version}` : r.output.slice(-500));
+        if (!ok) {
+          return {
+            content: [{ type: 'text' as const, text: JSON.stringify({ released: false, steps }, null, 2) }],
+            isError: true,
+          };
+        }
+      } catch (err) {
+        recordStep('set_project_info', false, err instanceof Error ? err.message : String(err));
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ released: false, steps }, null, 2) }],
+          isError: true,
+        };
+      }
+
+      // STEP 2: rebuild_library
+      try {
+        const script = scriptManager.prepareScriptWithHelpers(
+          'rebuild_library',
+          { PROJECT_FILE_PATH: libPath, REGENERATE_ARTIFACTS: 'true' },
+          ['_text_utils', 'ensure_project_open']
+        );
+        const r = await executor.executeScript(script, 180_000);
+        const ok = r.success && r.output.includes('SCRIPT_SUCCESS');
+        recordStep('rebuild_library', ok, ok ? 'rebuild done' : r.output.slice(-500));
+        if (!ok) {
+          return {
+            content: [{ type: 'text' as const, text: JSON.stringify({ released: false, steps }, null, 2) }],
+            isError: true,
+          };
+        }
+      } catch (err) {
+        recordStep('rebuild_library', false, err instanceof Error ? err.message : String(err));
+      }
+
+      // STEP 3: install_library_to_repository
+      try {
+        const script = scriptManager.prepareScriptWithHelpers(
+          'install_library_to_repository',
+          { PROJECT_FILE_PATH: libPath, REPOSITORY_NAME: '' },
+          ['_text_utils', 'ensure_project_open']
+        );
+        const r = await executor.executeScript(script);
+        const ok = r.success && r.output.includes('SCRIPT_SUCCESS');
+        recordStep('install_library_to_repository', ok, ok ? 'installed' : r.output.slice(-500));
+        if (!ok) {
+          return {
+            content: [{ type: 'text' as const, text: JSON.stringify({ released: false, steps }, null, 2) }],
+            isError: true,
+          };
+        }
+      } catch (err) {
+        recordStep('install_library_to_repository', false, err instanceof Error ? err.message : String(err));
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ released: false, steps }, null, 2) }],
+          isError: true,
+        };
+      }
+
+      // STEP 4: copy to distFolder
+      if (args.distFolder) {
+        try {
+          const distDir = resolvePath(args.distFolder, workspaceDir);
+          const baseName = path.basename(libPath, path.extname(libPath));
+          const targetDir = path.join(distDir, `v${args.version}`);
+          fs.mkdirSync(targetDir, { recursive: true });
+          const targetFile = path.join(targetDir, `${baseName}-v${args.version}.library`);
+          fs.copyFileSync(libPath, targetFile);
+          recordStep('copy_to_dist', true, `copied to ${targetFile}`);
+        } catch (err) {
+          recordStep('copy_to_dist', false, err instanceof Error ? err.message : String(err));
+        }
+      }
+
+      // STEP 5: git tag + gh release (optional)
+      if (args.gitTag) {
+        try {
+          const { execSync } = require('child_process');
+          const repoDir = path.dirname(libPath);
+          execSync(`git tag v${args.version}`, { cwd: repoDir, timeout: 10_000, stdio: 'pipe' });
+          recordStep('git_tag', true, `tagged v${args.version}`);
+          if (args.ghRelease) {
+            try {
+              execSync(`gh release create v${args.version} --generate-notes`, {
+                cwd: repoDir,
+                timeout: 30_000,
+                stdio: 'pipe',
+              });
+              recordStep('gh_release', true, `release v${args.version} created`);
+            } catch (gerr) {
+              recordStep('gh_release', false, gerr instanceof Error ? gerr.message : String(gerr));
+            }
+          }
+        } catch (err) {
+          recordStep('git_tag', false, err instanceof Error ? err.message : String(err));
+        }
+      }
+
+      const released = steps.every((s) => s.ok);
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({ released, version: args.version, steps }, null, 2) }],
+        isError: !released,
+      };
+    }
+  );
+
+  s.tool(
+    'set_library_reference_version',
+    "Change the version pin of a library reference in the consumer project's Library Manager (e.g. switch 'NexoMqttLib, * (NEXO)' to 'NexoMqttLib, 1.0.10'). Triggers re-resolution on next compile. Cascades through set_version() / version=property / remove+add fallback paths. WARNING: the remove+add fallback drops any consumer-side parameter overrides on that library -- save/export them first if needed (export_library_parameters).",
+    {
+      projectFilePath: z.string().describe("Path to the consumer .project file."),
+      libraryName: z.string().min(1).describe("Library name in Library Manager."),
+      version: z.string().min(1).describe("Target version (e.g. '1.0.10') or '*' for latest available."),
+    },
+    async (args: { projectFilePath: string; libraryName: string; version: string }) => {
+      const escaped = resolvePath(args.projectFilePath, workspaceDir);
+      const script = scriptManager.prepareScriptWithHelpers(
+        'set_library_reference_version',
+        {
+          PROJECT_FILE_PATH: escaped,
+          LIBRARY_NAME: args.libraryName.trim(),
+          NEW_VERSION: args.version.trim(),
+        },
+        ['_text_utils', 'ensure_project_open']
+      );
+      await backupManager.snapshot(escaped);
+      const result = await executor.executeScript(script);
+      return formatStructuredResponse(
+        result,
+        `Library reference version updated: ${args.libraryName} -> ${args.version}.`
+      );
+    }
+  );
+
+  s.tool(
+    'clean_project',
+    "Force a clean rebuild state. Runs target_app.clean() (or project.clean() for library projects) and -- when alsoEvictPrecompileCache=true (default) -- also deletes the .precompilecache / .compileinfo / .bootinfo cache files next to the source. Use when compile_project results don't reflect recent edits (cache lying) or before measuring a true cold-compile time.",
+    {
+      projectFilePath: z.string().describe("Path to the project file."),
+      alsoEvictPrecompileCache: z.boolean().describe("If true (default), also delete <project>.precompilecache / .compileinfo / .bootinfo files from disk.").optional(),
+    },
+    async (args: { projectFilePath: string; alsoEvictPrecompileCache?: boolean }) => {
+      const escaped = resolvePath(args.projectFilePath, workspaceDir);
+      const evict = args.alsoEvictPrecompileCache !== false;
+      const script = scriptManager.prepareScriptWithHelpers(
+        'clean_project',
+        {
+          PROJECT_FILE_PATH: escaped,
+          EVICT_PRECOMPILE_CACHE: evict ? 'true' : 'false',
+        },
+        ['_text_utils', 'ensure_project_open']
+      );
+      const result = await executor.executeScript(script);
+      return formatStructuredResponse(result, `Project cleaned: ${args.projectFilePath}.`);
+    }
+  );
+
+  s.tool(
     'diff_library_versions',
     "Compare two .library files (or two snapshots of the same library across versions) and return a structured diff: POUs/GVLs/DUTs added/removed/modified, library references added/removed/version-changed, and Project Information field changes. Pure parsing -- does NOT need CODESYS / AB running. Useful for release notes auto-generation, pre-install validation, and 'what changed since v1.0.5' investigations.",
     {
