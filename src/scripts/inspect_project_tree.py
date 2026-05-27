@@ -45,12 +45,33 @@ try:
         if hasattr(node, 'is_pou') and getattr(node, 'is_pou', False):
             return 'POU'
         if hasattr(node, 'textual_declaration'):
-            # Has decl text => POU-ish. Subdivide if we can detect TYPE...END_TYPE for DUT.
+            # Has decl text => POU-ish. Subdivide if we can detect
+            # TYPE...END_TYPE for DUT or VAR_GLOBAL for GVL. Be tolerant of
+            # leading comment lines: strip // single-line and /* ... */
+            # block comments before testing the first keyword.
             try:
                 decl = node.textual_declaration.text or ''
-                if 'TYPE' in decl.upper().split('\n', 1)[0]:
+                # Strip leading comments line-by-line until we find code.
+                stripped_lines = []
+                in_block_comment = False
+                for ln in decl.split('\n'):
+                    stripped = ln.strip()
+                    if in_block_comment:
+                        if '*)' in stripped or '*/' in stripped:
+                            in_block_comment = False
+                        continue
+                    if stripped.startswith('(*') or stripped.startswith('/*'):
+                        if not (stripped.endswith('*)') or stripped.endswith('*/')):
+                            in_block_comment = True
+                        continue
+                    if stripped.startswith('//') or stripped == '':
+                        continue
+                    stripped_lines.append(stripped)
+                    break  # first non-comment line is enough
+                first_code = stripped_lines[0].upper() if stripped_lines else decl.upper()
+                if first_code.startswith('TYPE'):
                     return 'DUT'
-                if decl.strip().upper().startswith('VAR_GLOBAL'):
+                if first_code.startswith('VAR_GLOBAL'):
                     return 'GVL'
                 return 'POU'
             except Exception:
@@ -156,18 +177,23 @@ try:
 
     _walk(primary_project, '', 0)
 
-    # Heuristic: did we see a LibraryManager node? If yes but libraries_ref
-    # is empty, the enumeration is the standard-edition limit (not a real
-    # "no libraries"). Annotate the response so callers know.
-    saw_library_manager = any(
-        'librarymanager' in (f.get(u'name', '') or '').lower().replace(' ', '').replace('_', '')
-        for f in folders
-    )
-    # _kind_of returns 'LibraryManager' for the node but we don't store it
-    # in folders/devices/pous etc; flag via a separate boolean and a hint.
+    # Surface countsHint for any category that came up empty. The hint
+    # disambiguates "genuinely none" from "enumeration failed on this build
+    # / Standard edition limit / detection heuristic didn't fire". Downstream
+    # callers should NOT assume 0 means "none referenced".
     counts_hint = {}
     if len(libraries_ref) == 0:
         counts_hint[u'libraries'] = u'enumeration_unavailable_on_this_build_or_no_library_manager_present'
+    if len(gvls) == 0:
+        # GVL detection relies on is_gvl flag OR textual_declaration starting
+        # with VAR_GLOBAL after comment-stripping. If neither fires, GVLs
+        # might exist but be invisible (e.g. compiled-only or behind a
+        # custom node type).
+        counts_hint[u'gvls'] = u'detection_heuristic_did_not_fire_or_no_gvls_present'
+    if len(duts) == 0:
+        counts_hint[u'duts'] = u'detection_heuristic_did_not_fire_or_no_duts_present'
+    if len(tasks) == 0:
+        counts_hint[u'tasks'] = u'no_task_configuration_found_typical_for_library_projects'
 
     emit_result({
         u'projectName': _to_unicode(project_name) if project_name else None,
