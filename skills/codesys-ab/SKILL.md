@@ -114,12 +114,24 @@ Una sola volta per sessione (o dopo `shutdown_codesys`). Serve all'utente per ve
 - `set_device_parameter(projectFilePath, devicePath, parameterName, value)`.
 - `map_io_channel(projectFilePath, channelPath, variableName, ...)`.
 
-### Online / runtime (richiede PLC raggiungibile)
-- `connect_to_device(projectFilePath, devicePath, ipAddress?, gatewayName?)` → patch 2026-05-26: ora **risolve gatewayName → GUID** via communication_manager (prima rifiutava `Gateway-1` con "Guid should contain 32 digits with 4 dashes"). Include anche un priming step per ridurre "Stack empty" su AB Standard.
-- `set_credentials`, `set_simulation_mode`.
-- `disconnect_from_device`, `get_application_state`.
-- `read_variable`, `write_variable`, `monitor_variables`.
-- `download_to_device`, `start_stop_application`.
+### Online / runtime — ⚠️ INHERENT LIMIT su AB 2.9 Standard
+
+**Confermato empiricamente 2026-05-27**: i tool online-side **NON funzionano su AB 2.9 Standard** dopo UI Login. Tutti gli accessor `online_application` (su target_app, primary_project, ancestor chain Plc Logic / PLC_AC500_V3, e su `script_engine.online`) ritornano `present=[]` via `hasattr`. La scripting API Standard genuinamente non espone il riuso della sessione online creata dall'UI. Tutti questi tool fallirebbero con `ERR_ONLINE_STACK_EMPTY`:
+
+- `connect_to_device(projectFilePath, devicePath, ipAddress?, gatewayName?)` — gateway resolver patch presente, ma il successivo create_online_application sbatte sullo Stack empty
+- `get_application_state`, `read_variable`, `write_variable`, `monitor_variables`
+- `download_to_device`, `start_stop_application`
+- `disconnect_from_device`
+
+**Workaround consigliato per AB 2.9 Standard (mixed-mode)**:
+- **MCP**: project prep + compile + library release (`set_pou_code`, `compile_project`, `release_library_version`, `install_library_to_repository`, ecc.) — questi funzionano perfettamente
+- **AB UI**: Online → Login + Download + Watch panel per runtime observation/control
+- **Out-of-band**: per smoke testing automatizzato, parla con il PLC tramite il suo protocollo applicativo (MQTT broker, OPC UA server, HTTP API del controller, ecc.) invece che via scripting MCP
+
+**Tool ancora utili anche su Standard**:
+- `set_credentials`, `set_simulation_mode` — settano valori nel progetto, non richiedono online session
+
+**Su AB Premium**: questi tool dovrebbero funzionare (Tools → Scripting → Execute Script File espone un IDE context che popola lo stack), ma non testati empiricamente nel fork.
 
 ## Pattern ricorrenti
 
@@ -236,6 +248,7 @@ reset_library_parameter(consumerPath, 'NexoMqttLib', 'GC_MAX_TAG_DEFINITIONS')
 | **"MCP locked, devo riavviare AB"** (commands time out, AB visivamente attiva, nessun dialog) | Watcher worker thread dead o primary UI thread deadlocked. **Patch 2026-05-26**: state auto-flippa a `stalled` dopo 30s di heartbeat staleness; ResilientExecutor auto-trigger di forceReset dopo 2 timeout consecutivi. | 1. `diagnose_mcp_state` per confermare. 2. `force_reset_watcher` (~10-30s). 3. Se anche reset fallisce: `shutdown_codesys` + `launch_codesys` manuale. Auto-recovery dovrebbe coprire la maggior parte dei casi senza intervento. |
 | `Cannot add an object because it affects a device you are currently logged into` (su `create_pou`/`set_pou_code`/`create_method`/`delete_object` o `compile_project`) | Una sessione online attiva blocca le modifiche structural alla configurazione device | Chiedi all'utente di fare `Online → Logout` dall'AB UI. **Non chiamare `disconnect_from_device` aspettandoti che funzioni** — vedi sotto. |
 | `disconnect_from_device` ritorna OK ma AB è ancora online | Limite **inherent** della scripting API di CODESYS V3.5 SP19 Standard edition (la sessione online creata dall'UI non è raggiungibile via `script_engine.online.create_online_application`, e `system.commands` non espone il menu `Online.Logout` su Standard) | Chiedi sempre all'utente di fare `Online → Logout` dall'AB UI prima di operazioni che richiedono PLC offline. Il tool MCP è un no-op affidabile **solo** quando già si era loggati via `connect_to_device` MCP. |
+| **`ERR_ONLINE_STACK_EMPTY` su read_variable / write_variable / get_application_state / download_to_device DOPO che user ha fatto UI Online → Login** | **Limite inherent AB 2.9 Standard confermato empiricamente 2026-05-27** via probe di 4 host (target_app / primary_project / ancestor chain / se.online) × 6 attribute candidates: tutti ritornano `present=[]` via hasattr. La sessione online creata dall'UI è genuinamente non raggiungibile da scripting su Standard. | **NON ritentare via MCP.** Workaround mixed-mode: MCP per prep/compile/release, AB UI Watch panel per runtime observation, protocollo applicativo del PLC (MQTT/OPC UA/HTTP) per smoke testing automatizzato. **Su Premium dovrebbe funzionare** (untested). |
 | `compile_project` ritorna `0 error(s)` ma AB UI mostra errori syntax-level (es. `C0046 Identifier 'X' not defined`) | **CODESYS non analizza POU non chiamati nel call graph.** Un typo in una `FUNCTION` leaf mai invocata produce "Build complete -- 0 errors" dal compilatore. L'UI mostra l'errore via il linter live (syntax-level, separato dal compile). Il MCP riporta correttamente quello che il compilatore dice. | Non è un bug del MCP. Per testare il path-errore, iniettare il typo in **codice raggiungibile** (PLC_PRG o un FB chiamato dall'application attiva). Verifica con `%TEMP%\codesys-mcp-compile-debug.txt` (mirror diagnostic): cerca la riga `Build complete -- N errors, M warnings`. |
 
 ### Diagnostica `compile_project` su disco
