@@ -25,6 +25,7 @@
  *     library deliverables typically).
  */
 import * as fs from 'fs';
+import { detectProjectFormat } from './offline-reader';
 
 export interface LibraryObject {
   name: string;
@@ -100,6 +101,18 @@ function bodyHash(body: string): string {
  * has been stable across AB 2.9 SPxx builds we support.
  */
 export function parseLibrarySnapshot(filePath: string): LibrarySnapshot {
+  const fmt = detectProjectFormat(filePath);
+  if (fmt === 'binary') {
+    throw new Error(
+      `File '${filePath}' is in CODESYS's proprietary binary container format. ` +
+      `Pure-Node library diff requires PLCopen XML form. Workaround: open the ` +
+      `library in AB and File > Export PLCopen XML... to produce an XML file, ` +
+      `then diff the XML exports of the two versions.`
+    );
+  }
+  if (fmt === 'unknown') {
+    throw new Error(`Cannot identify format of '${filePath}'.`);
+  }
   const text = fs.readFileSync(filePath, 'utf-8');
   const objects = new Map<string, LibraryObject>();
 

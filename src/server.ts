@@ -15,6 +15,7 @@ import { ScriptManager } from './script-manager';
 import { ExecutorProxy, ResilientExecutor } from './executor-proxy';
 import { BackupManager } from './backup-manager';
 import { diffLibraryFiles } from './library-diff';
+import { parseProjectOffline, searchProjectOffline } from './offline-reader';
 import { parseResultJson } from './result-parser';
 import { serverLog, setLogLevel } from './logger';
 
@@ -947,6 +948,28 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
   );
 
   s.tool(
+    'get_pou_dependency_graph',
+    "Build a directed call graph of POUs/FBs/Methods in the project: for each pair (caller, callee) the script detects whether the callee's name appears word-boundary-matched in the caller's body. Optionally compute reachability from a root POU (typically 'PLC_PRG') to flag dead-code POUs not reachable from the application's entry point. Useful for architecture review, refactoring impact analysis, and understanding why a typo in an unreferenced POU did NOT show up in compile (CODESYS doesn't analyze unreachable code).",
+    {
+      projectFilePath: z.string().describe("Path to the project file."),
+      rootPOU: z.string().describe("Optional root POU name (e.g. 'PLC_PRG'). When provided, the graph is annotated with isDeadCode=true for POUs unreachable from this root.").optional(),
+    },
+    async (args: { projectFilePath: string; rootPOU?: string }) => {
+      const escaped = resolvePath(args.projectFilePath, workspaceDir);
+      const script = scriptManager.prepareScriptWithHelpers(
+        'get_pou_dependency_graph',
+        {
+          PROJECT_FILE_PATH: escaped,
+          ROOT_POU: (args.rootPOU ?? '').trim(),
+        },
+        ['_text_utils', 'ensure_project_open']
+      );
+      const result = await executor.executeScript(script, 120_000);
+      return formatStructuredResponse(result, 'POU dependency graph built.');
+    }
+  );
+
+  s.tool(
     'create_ac500_project',
     "Create a new AC500 V3 .project file by copying an existing clean AC500 template and optionally adding initial libraries. AB Standard does NOT ship with an AC500-specific stock template that the scripting API can use directly, so the caller provides a known-good AC500 project to use as the base (typically a vanilla NexoPlcExample.project with no user code). The template's device tree (PM5650-2ETH / PM5032 / etc) is preserved exactly. To use a different PLC model, point the templateProjectPath at a project that already targets that model.",
     {
@@ -1183,7 +1206,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   s.tool(
     'diff_library_versions',
-    "Compare two .library files (or two snapshots of the same library across versions) and return a structured diff: POUs/GVLs/DUTs added/removed/modified, library references added/removed/version-changed, and Project Information field changes. Pure parsing -- does NOT need CODESYS / AB running. Useful for release notes auto-generation, pre-install validation, and 'what changed since v1.0.5' investigations.",
+    "Compare two PLCopen XML exports of a library (or two snapshots across versions) and return a structured diff: POUs/GVLs/DUTs added/removed/modified, library references added/removed/version-changed, Project Information field changes. **IMPORTANT**: Native CODESYS .library files are binary and unsupported. First export PLCopen XML from each version's library (File > Export PLCopen XML... in AB), then diff the XML files. Useful for release notes auto-generation, pre-install validation, and 'what changed' investigations across versions.",
     {
       sourceLibraryPath: z.string().min(1).describe("Path to the OLDER .library file (the 'from' side)."),
       targetLibraryPath: z.string().min(1).describe("Path to the NEWER .library file (the 'to' side)."),
@@ -1201,6 +1224,62 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         const msg = err instanceof Error ? err.message : String(err);
         return {
           content: [{ type: 'text' as const, text: `diff_library_versions failed: ${msg}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  s.tool(
+    'get_all_pou_code_offline',
+    "Read POU/GVL/DUT declaration + implementation bodies from a PLCopen XML export by parsing the file directly -- NO CODESYS instance required. **IMPORTANT**: Native CODESYS .project / .library files on AB 2.9 are in a proprietary BINARY container format and CANNOT be parsed by this tool (it will throw with a guiding error). To use this tool, first run File > Export PLCopen XML... in AB on the project of interest to produce an XML file, then point this tool at the .xml. Useful for concurrent reads while user has the (binary) project open in AB UI -- the export XML is a static snapshot and can be re-parsed at any time.",
+    {
+      projectFilePath: z.string().describe("Path to the .project / .library file."),
+    },
+    async (args: { projectFilePath: string }) => {
+      try {
+        const abs = resolvePath(args.projectFilePath, workspaceDir);
+        const snap = parseProjectOffline(abs);
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify(snap, null, 2) }],
+          isError: false,
+        };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: 'text' as const, text: `get_all_pou_code_offline failed: ${msg}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  s.tool(
+    'search_code_offline',
+    "Search POU/GVL/DUT bodies in a PLCopen XML export by parsing the file directly. **IMPORTANT**: Native CODESYS .project / .library files are binary and unsupported (throws with guiding error). Export PLCopen XML from AB first, then point this tool at the .xml. Use for fast searches when AB is busy / locked / would be slow to launch.",
+    {
+      projectFilePath: z.string().describe("Path to the .project / .library file."),
+      pattern: z.string().min(1).describe("Search pattern. Literal substring by default; pass regex=true to interpret as regex."),
+      regex: z.boolean().describe("If true, interpret pattern as a regex. Default false (literal substring).").optional(),
+      caseSensitive: z.boolean().describe("If true, case-sensitive match. Default false.").optional(),
+      maxHits: z.number().int().positive().describe("Maximum hits to return. Default 500.").optional(),
+    },
+    async (args: { projectFilePath: string; pattern: string; regex?: boolean; caseSensitive?: boolean; maxHits?: number }) => {
+      try {
+        const abs = resolvePath(args.projectFilePath, workspaceDir);
+        const hits = searchProjectOffline(abs, args.pattern, {
+          regex: args.regex,
+          caseSensitive: args.caseSensitive,
+          maxHits: args.maxHits,
+        });
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ pattern: args.pattern, hits }, null, 2) }],
+          isError: false,
+        };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: 'text' as const, text: `search_code_offline failed: ${msg}` }],
           isError: true,
         };
       }

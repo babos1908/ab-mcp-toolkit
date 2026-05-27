@@ -89,23 +89,49 @@ def _resolve_gateway_guid(name):
     return target
 
 
-def _prime_online_session():
-    """Run a no-op command via the command manager to populate the IronPython
-    online-context stack before create_online_application is called.
+def _prime_online_session(target_app=None):
+    """Populate the IronPython online-context stack BEFORE
+    create_online_application is called.
 
     AB 2.9 Standard surfaces a 'Stack empty' error from
     se.online.create_online_application when the IDE context stack hasn't
     been touched in this scripting session. Empirically clicking
-    'Online > Login' once in the UI fixes it. We try to do the equivalent
-    via system.commands without actually logging in. If the priming command
-    isn't available, we silently continue -- create_online_application
-    surfaces its own error.
+    'Online > Login' once in the UI fixes it. This helper tries three
+    strategies in order, each best-effort:
+
+      1. target_app.online_application (proprietà che ritorna la sessione
+         online corrente se presente). If this returns a non-null object,
+         we already have the priming we need -- the caller can re-use it.
+         Returns the object if found.
+      2. system.commands.find_commands('Online.*') -- mere PRESENCE check
+         (not execute) of read-only Online commands may populate the
+         context on some builds.
+      3. system.commands.find_commands('Online.OnlineConfigMode') +
+         execute() -- last resort, attempts to drive the menu command
+         that would normally come from a UI click. May fail silently
+         on Standard (the command may exist but be gated).
+
+    Returns the online_application handle if strategy 1 found one;
+    otherwise None. The caller then proceeds to
+    create_online_application(target_app) as normal.
     """
+    # Strategy 1: target_app.online_application
+    if target_app is not None:
+        for attr in ('online_application', 'current_online_application'):
+            if hasattr(target_app, attr):
+                try:
+                    v = getattr(target_app, attr)
+                    if v is not None:
+                        print("DEBUG: prime: target_app.%s returned an existing online session." % attr)
+                        return v
+                except Exception as ge:
+                    print("DEBUG: prime: target_app.%s access raised: %s" % (attr, ge))
+
     cmd_mgr = getattr(getattr(script_engine, 'system', None), 'commands', None)
     if cmd_mgr is None:
-        print("DEBUG: system.commands not exposed; skipping prime step.")
-        return
-    # Probe for a discovery method on the command manager.
+        print("DEBUG: system.commands not exposed; skipping further priming.")
+        return None
+
     find_fn = None
     for attr in ('find_commands', 'find', 'get_commands'):
         if hasattr(cmd_mgr, attr):
@@ -113,17 +139,33 @@ def _prime_online_session():
             break
     if find_fn is None:
         print("DEBUG: command manager has no find_commands-style accessor.")
-        return
-    # Commands worth trying for priming (in order). They are all read-only.
+        return None
+
+    # Strategy 2: presence check (some builds populate context from this alone)
     for cmd_name in ('Online.OnlineConfigMode', 'Online.OnlineSelected', 'View.OnlineActions'):
         try:
             cmds = find_fn(cmd_name)
             if cmds:
-                print("DEBUG: prime: command '%s' exists (count=%d). Not invoking; "
-                      "presence alone may suffice to populate the context." % (cmd_name, len(cmds)))
-                return
+                print("DEBUG: prime: '%s' presence detected (count=%d)." % (cmd_name, len(cmds)))
         except Exception as ce:
             print("DEBUG: prime: find_fn('%s') raised: %s" % (cmd_name, ce))
+
+    # Strategy 3: try actually executing a Read-only Online command
+    # (OnlineConfigMode is typically a TOGGLE check, not a destructive op).
+    # On Premium / dev builds this works; on Standard it may be gated.
+    try:
+        cmds = find_fn('Online.OnlineConfigMode')
+        if cmds:
+            try:
+                cmd = cmds[0]
+                if hasattr(cmd, 'execute'):
+                    cmd.execute()
+                    print("DEBUG: prime: Online.OnlineConfigMode.execute() invoked.")
+            except Exception as exec_err:
+                print("DEBUG: prime: OnlineConfigMode.execute() failed (expected on some builds): %s" % exec_err)
+    except Exception:
+        pass
+    return None
 
 
 try:

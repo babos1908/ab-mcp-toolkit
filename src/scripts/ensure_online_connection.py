@@ -36,19 +36,43 @@ def ensure_online_connection(primary_project):
     print("DEBUG: target_app: '%s'" % app_name)
 
     import scriptengine as se
+
+    # Strategy 1: try the EXISTING online session reachable via the
+    # application's online_application property. This avoids the
+    # "Stack empty" issue on Standard edition entirely if the user has
+    # already done a UI Login -- we reuse their session instead of
+    # spawning a parallel one.
+    for attr in ('online_application', 'current_online_application'):
+        if hasattr(target_app, attr):
+            try:
+                existing = getattr(target_app, attr)
+                if existing is not None:
+                    print("DEBUG: reused existing online session via target_app.%s" % attr)
+                    return existing, target_app
+            except Exception as ge:
+                print("DEBUG: target_app.%s raised: %s" % (attr, ge))
+
+    # Strategy 2: standard create_online_application path.
     try:
         oa = se.online.create_online_application(target_app)
         if oa is not None:
             print("DEBUG: create_online_application OK")
             return oa, target_app
     except Exception as e:
+        # Differentiate stack-empty from other failures so the agent can
+        # decide whether the workaround applies.
+        err_text = str(e)
+        if 'stack' in err_text.lower() and 'empty' in err_text.lower():
+            print("SCRIPT_ERROR_CODE: ERR_ONLINE_STACK_EMPTY")
         msg = (
             "create_online_application failed for '%s': %s. "
             "For simulation, call set_simulation_mode(enable=True) first; "
             "for a real PLC, ensure the gateway/address is set on the "
             "device (or pass ipAddress/gatewayName to connect_to_device). "
             "If simulation is engaged but this still raises 'Stack empty', "
-            "click Online -> Login once in the IDE for this session."
+            "click Online -> Login once in the IDE for this session (the "
+            "MCP will then reuse your session via target_app.online_application "
+            "on subsequent calls)."
         ) % (app_name, e)
         raise RuntimeError(msg)
 
