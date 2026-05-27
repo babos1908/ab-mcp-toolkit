@@ -13,6 +13,7 @@ import { CodesysLauncher } from './launcher';
 import { HeadlessExecutor } from './headless';
 import { ScriptManager } from './script-manager';
 import { ExecutorProxy, ResilientExecutor } from './executor-proxy';
+import { BackupManager } from './backup-manager';
 import { parseResultJson } from './result-parser';
 import { serverLog, setLogLevel } from './logger';
 
@@ -28,22 +29,86 @@ function sanitizePouPath(pouPath: string): string {
   return pouPath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
 }
 
+/**
+ * Pluck an MCPErrorCode marker from a script's stdout if present. Scripts
+ * emit lines of the form
+ *     SCRIPT_ERROR_CODE: ERR_<X>
+ * to surface a structured error code in addition to the human-readable
+ * SCRIPT_ERROR line. Returns null when no marker is present (uncoded error).
+ */
+function extractErrorCode(output: string): string | null {
+  const marker = 'SCRIPT_ERROR_CODE:';
+  const idx = output.lastIndexOf(marker);
+  if (idx === -1) return null;
+  // Take the rest of that line (until \n or end) and trim.
+  const rest = output.slice(idx + marker.length);
+  const nl = rest.indexOf('\n');
+  const code = (nl === -1 ? rest : rest.slice(0, nl)).trim();
+  return code || null;
+}
+
 /** Format an IpcResult into an MCP tool response */
 function formatToolResponse(
   result: IpcResult,
   successMessage: string
 ): { content: Array<{ type: 'text'; text: string }>; isError: boolean } {
   const success = result.success && result.output.includes('SCRIPT_SUCCESS');
+  if (success) {
+    return {
+      content: [{ type: 'text' as const, text: successMessage }],
+      isError: false,
+    };
+  }
+  // Failure path: surface error code if present so the agent can switch on
+  // it without parsing prose.
+  const code = extractErrorCode(result.output);
+  const codePrefix = code ? `[${code}] ` : '';
   return {
     content: [
       {
         type: 'text' as const,
-        text: success
-          ? successMessage
-          : `Operation failed. Output:\n${result.output}${result.error ? '\nError: ' + result.error : ''}`,
+        text: `${codePrefix}Operation failed. Output:\n${result.output}${result.error ? '\nError: ' + result.error : ''}`,
       },
     ],
-    isError: !success,
+    isError: true,
+  };
+}
+
+/**
+ * Format an IpcResult that emits a structured JSON payload via emit_result()
+ * into an MCP tool response. On success, parses the `### RESULT_JSON ###`
+ * block and returns the pretty-printed JSON so callers (LLM or scripts) can
+ * actually consume the data instead of just a "done" message.
+ *
+ * On failure or missing JSON block, falls back to formatToolResponse so the
+ * error path is consistent across tools. summaryPrefix (optional) is
+ * prepended to the JSON block, useful when the tool also wants to surface
+ * a one-line summary (e.g. "3 libraries enumerated:") above the data.
+ */
+function formatStructuredResponse(
+  result: IpcResult,
+  fallbackSuccessMessage: string,
+  summaryPrefix?: string
+): { content: Array<{ type: 'text'; text: string }>; isError: boolean } {
+  const success = result.success && result.output.includes('SCRIPT_SUCCESS');
+  if (!success) {
+    return formatToolResponse(result, fallbackSuccessMessage);
+  }
+  const parsed = parseResultJson(result.output);
+  if (!parsed.ok) {
+    // Script ran successfully but emitted no JSON. Fall back to the
+    // text-only success message so the caller at least sees something.
+    return formatToolResponse(result, fallbackSuccessMessage);
+  }
+  const jsonText = JSON.stringify(parsed.data, null, 2);
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: summaryPrefix ? `${summaryPrefix}\n${jsonText}` : jsonText,
+      },
+    ],
+    isError: false,
   };
 }
 
@@ -54,6 +119,77 @@ async function fileExists(filePath: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * List of named patches applied in the babos1908/ab-mcp-toolkit fork relative
+ * to the luke-harriman/Codesys-MCP upstream. Surfaced via get_mcp_version so
+ * agents (and the agent-side skill) can verify which fixes are active in
+ * this build before assuming a workaround is needed for a known-fixed bug.
+ *
+ * Keep this list in sync with the actual commits in this repo. Order is
+ * roughly chronological. Each entry maps a short stable ID to a description.
+ */
+const MCP_PATCHES: Array<{ id: string; description: string }> = [
+  { id: 'ready-timeout-ms-configurable', description: 'CLI --ready-timeout-ms flag wired to LauncherConfig (cold-start ~120s on AB)' },
+  { id: 'command-timeout-wired', description: 'CLI --timeout wired to IpcClient.commandTimeoutMs (previously ignored)' },
+  { id: 'attach-codesys-tool', description: 'attach_codesys tool for Premium edition (Tools > Scripting > Execute Script File flow)' },
+  { id: 'create-pou-function-return-type', description: 'create_pou for type=Function accepts returnType parameter' },
+  { id: 'create-pou-interface', description: 'create_pou supports type=Interface via parent.create_interface()' },
+  { id: 'create-pou-parameter-list', description: 'create_pou type=ParameterList probes 7 candidate method names + enum fallback' },
+  { id: 'compile-project-categories', description: 'compile_project / get_compile_messages force-merge Build / Precompile / Additional code checks category GUIDs + re-enumerate post-build' },
+  { id: 'compile-project-library', description: 'compile_project supports .library projects via check_all_pool_objects path' },
+  { id: 'close-project-tool', description: 'close_project tool for switching between projects without shutdown+launch' },
+  { id: 'install-library-to-repository', description: 'install_library_to_repository with 3-arg signature (path, repo, overwrite=True)' },
+  { id: 'set-project-info', description: 'set_project_info / get_project_info tools (Project Information node read/write)' },
+  { id: 'task-configuration', description: 'get_task_configuration / set_task_parameter (TaskConfiguration node name normalization)' },
+  { id: 'gateway-guid-resolution', description: 'connect_to_device resolves gateway display name to GUID via communication_manager' },
+  { id: 'watcher-heartbeat', description: 'watcher writes heartbeat.signal every ~5s + stale-file cleanup at startup' },
+  { id: 'stalled-state', description: 'CodesysState=stalled when heartbeat stale; executeScript rejects fast with guiding error' },
+  { id: 'force-reset-watcher', description: 'force_reset_watcher tool for fast lock recovery (kill+cleanup+relaunch)' },
+  { id: 'diagnose-mcp-state', description: 'diagnose_mcp_state read-only diagnostic dump with interpretation' },
+  { id: 'auto-recovery', description: 'ResilientExecutor auto-triggers forceReset on 2 consecutive timeouts and retries' },
+  { id: 'structured-json-responses', description: 'get_project_info / get_task_configuration return parsed JSON payload via formatStructuredResponse' },
+  { id: 'mcp-error-codes', description: 'MCPErrorCode enum + SCRIPT_ERROR_CODE: marker in script outputs' },
+];
+
+/** Read the MCP package.json version. Cached after first call. */
+let _cachedPackageVersion: string | null = null;
+function getPackageVersion(): string {
+  if (_cachedPackageVersion !== null) return _cachedPackageVersion;
+  try {
+    // dist/server.js sits next to dist/, while package.json is at dist/../
+    // Resolve relative to this file's directory.
+    const pkgPath = path.join(__dirname, '..', 'package.json');
+    const raw = fs.readFileSync(pkgPath, 'utf-8');
+    const pkg = JSON.parse(raw);
+    _cachedPackageVersion = String(pkg.version ?? 'unknown');
+  } catch {
+    _cachedPackageVersion = 'unknown';
+  }
+  return _cachedPackageVersion;
+}
+
+/**
+ * Resolve the current git commit SHA for the installed MCP code. Best-effort:
+ * if the repo isn't a git checkout (e.g. installed via npm tarball), returns
+ * 'unknown'. Run synchronously since this is a cold-path tool call.
+ */
+function getBuildSha(): string {
+  try {
+    const { execSync } = require('child_process');
+    // Run in the package root (dist's parent).
+    const repoRoot = path.join(__dirname, '..');
+    const sha = execSync('git rev-parse HEAD', {
+      cwd: repoRoot,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 3_000,
+    });
+    return String(sha).trim();
+  } catch {
+    return 'unknown';
   }
 }
 
@@ -98,6 +234,11 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
   let executionMode: ExecutionMode = config.mode;
   const initialExecutor: ScriptExecutor = new HeadlessExecutor(config);
   const executor = new ExecutorProxy(initialExecutor);
+
+  // BackupManager: snapshots .project/.library files before destructive
+  // tool handlers run. Created once and shared across all handlers.
+  // Opt-out via config.autoBackup = false (CLI: --no-auto-backup).
+  const backupManager = new BackupManager({ autoBackup: config.autoBackup });
 
   if (config.mode === 'persistent') {
     launcher = new CodesysLauncher(config);
@@ -264,6 +405,27 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       ].filter(Boolean).join('\n');
       return {
         content: [{ type: 'text' as const, text }],
+        isError: false,
+      };
+    }
+  );
+
+  s.tool(
+    'get_mcp_version',
+    "Returns the MCP server's package version, the git commit SHA of the running build, and the list of named patches applied in this fork. Use to verify which fixes are active before assuming a workaround is needed for a known-fixed bug.",
+    async () => {
+      const payload = {
+        mcpVersion: getPackageVersion(),
+        buildSha: getBuildSha(),
+        codesysPath: config.codesysPath,
+        codesysProfile: config.profileName,
+        mode: executionMode,
+        patches: MCP_PATCHES,
+      };
+      return {
+        content: [
+          { type: 'text' as const, text: JSON.stringify(payload, null, 2) },
+        ],
         isError: false,
       };
     }
@@ -459,6 +621,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         },
         ['_text_utils', 'ensure_project_open']
       );
+      await backupManager.snapshot(escaped);
       const result = await executor.executeScript(script);
       return formatToolResponse(
         result,
@@ -481,7 +644,14 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         ['_text_utils', 'ensure_project_open']
       );
       const result = await executor.executeScript(script);
-      return formatToolResponse(result, `Project Information read for ${args.projectFilePath}.`);
+      // Return the structured JSON payload emitted by emit_result() so callers
+      // (LLM or scripts) can actually consume the version/title/author fields.
+      // Previously formatToolResponse stripped the JSON and returned only the
+      // success summary string, making the tool useless for chained tooling.
+      return formatStructuredResponse(
+        result,
+        `Project Information read for ${args.projectFilePath}.`
+      );
     }
   );
 
@@ -587,6 +757,8 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         },
         ['_text_utils', 'ensure_project_open', 'find_object_by_path']
       );
+      // Snapshot before destructive op (no-op when autoBackup=false).
+      await backupManager.snapshot(escProjPath);
       const result = await executor.executeScript(script);
       return formatToolResponse(
         result,
@@ -951,6 +1123,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         },
         ['_text_utils', 'ensure_project_open', 'find_object_by_path']
       );
+      await backupManager.snapshot(escProjPath);
       const result = await executor.executeScript(script);
       return formatToolResponse(
         result,
@@ -1619,7 +1792,12 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         ['_text_utils', 'ensure_project_open']
       );
       const result = await executor.executeScript(script);
-      return formatToolResponse(result, `Task configuration read for ${args.projectFilePath}.`);
+      // Surface the structured task_configurations payload (same fix as
+      // get_project_info -- formatToolResponse was stripping the JSON block).
+      return formatStructuredResponse(
+        result,
+        `Task configuration read for ${args.projectFilePath}.`
+      );
     }
   );
 
@@ -1667,6 +1845,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         },
         ['_text_utils', 'ensure_project_open']
       );
+      await backupManager.snapshot(escaped);
       const result = await executor.executeScript(script);
       return formatToolResponse(
         result,
@@ -1946,6 +2125,9 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         },
         ['_text_utils', 'ensure_project_open']
       );
+      // Snapshot the .library before pushing it into the repo (the install
+      // re-saves the project as part of the flow).
+      await backupManager.snapshot(escaped);
       const result = await executor.executeScript(script);
       return formatToolResponse(
         result,

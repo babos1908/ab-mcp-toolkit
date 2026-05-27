@@ -73,7 +73,14 @@ export class ResilientExecutor implements ResettableExecutor {
       return result;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      const isTimeout = /timed out after \d+ms/i.test(msg);
+      // Recognise the IpcClient timeout signature emitted by ipc.ts:172
+      // ("Command <id> timed out after <ms>ms waiting for result"). We still
+      // use the string check here because the underlying throw is a plain
+      // Error from IpcClient; once we migrate IpcClient to throw a typed
+      // error carrying MCPErrorCode.ERR_TIMEOUT this check becomes a type
+      // guard. For now string match against the stable IpcClient message
+      // format is acceptable -- IpcClient is in-repo so message is stable.
+      const isTimeout = /timed out after \d+ms waiting for result/i.test(msg);
       if (!isTimeout) {
         // Not a timeout -- propagate without touching the counter.
         throw err;

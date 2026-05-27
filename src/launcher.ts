@@ -11,6 +11,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { LauncherConfig, LauncherStatus, CodesysState, IpcResult, ScriptExecutor } from './types';
 import { IpcClient, DEFAULT_IPC_CONFIG } from './ipc';
 import { ScriptManager } from './script-manager';
+import { sweepStaleLocks } from './lock-file';
 import { launcherLog } from './logger';
 
 const SESSION_DIR_PREFIX = 'codesys-mcp-persistent';
@@ -85,6 +86,20 @@ export class CodesysLauncher implements ScriptExecutor {
     this.ipcDir = path.join(os.tmpdir(), SESSION_DIR_PREFIX, this.sessionId);
 
     launcherLog.info(`Session ${this.sessionId} — IPC dir: ${this.ipcDir}`);
+
+    // Stale lock-file sweep BEFORE launching. After a crash or
+    // force_reset_watcher, .lock files next to .project/.library files can
+    // survive and trigger "selected project is currently in use by 'X' on
+    // 'Y'" on the next open_project. We sweep the configured workspaceDir
+    // first; if the user opens a project from elsewhere, the lock-aware
+    // retry in ensure_project_open handles the per-file case.
+    try {
+      if (this.config.workspaceDir) {
+        sweepStaleLocks(this.config.workspaceDir);
+      }
+    } catch (sweepErr) {
+      launcherLog.warn(`Stale lock sweep raised (ignored): ${sweepErr}`);
+    }
 
     // Create IPC client and directories. commandTimeoutMs from LauncherConfig
     // overrides the default so heavy operations (cold project open, large

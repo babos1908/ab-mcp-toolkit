@@ -41,6 +41,7 @@ program
     'persistent'
   )
   .option('--no-auto-launch', 'Do not auto-launch CODESYS on startup')
+  .option('--no-auto-backup', 'Disable automatic .project/.library snapshots before destructive tools (default: ON). Snapshots are saved as <path>.backup-YYYYMMDDTHHMMSSZ next to the source file.')
   .option('--fallback-headless', 'Fall back to headless if persistent fails', true)
   .option('--keep-alive', 'Keep CODESYS running after server stops', false)
   .option('--kill-existing-codesys', 'Kill any running CODESYS.exe before launching (dev convenience; off by default)', false)
@@ -94,6 +95,9 @@ if (opts.detect) {
     profileName: opts.codesysProfile.trim(),
     workspaceDir: opts.workspace.trim(),
     autoLaunch: opts.autoLaunch !== false,
+    // commander turns --no-auto-backup into opts.autoBackup === false.
+    // Default ON unless explicitly opted out.
+    autoBackup: opts.autoBackup !== false,
     keepAlive: opts.keepAlive || false,
     killExistingCodesys: opts.killExistingCodesys || false,
     timeoutMs: cmdTimeoutMs,

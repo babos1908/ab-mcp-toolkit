@@ -5,6 +5,89 @@
 export type RequestId = string;
 export type SessionId = string;
 
+/**
+ * Standardized error codes surfaced by MCP tool failures. Goals:
+ *
+ *  - Replace fragile regex string matching (e.g. /timed out after \d+ms/) in
+ *    ResilientExecutor and the agent-side skill with explicit identifiers.
+ *  - Let scripts emit a structured marker `SCRIPT_ERROR_CODE: ERR_<X>` that
+ *    server.ts can pluck out and surface as the tool's error code, in
+ *    addition to the human-readable message.
+ *  - Document the error taxonomy in one place so new tools nascano with
+ *    aligned codes instead of inventing prose.
+ *
+ * Convention: ALL_CAPS_SNAKE prefixed with ERR_. Add new codes here AND in
+ * the matching script-side marker (search src/scripts for SCRIPT_ERROR_CODE).
+ */
+export enum MCPErrorCode {
+  // ─── IPC / lifecycle ──────────────────────────────────────────────
+  /** Command did not return within commandTimeoutMs. */
+  ERR_TIMEOUT = 'ERR_TIMEOUT',
+  /** Watcher heartbeat is stale; primary thread or worker thread stuck. */
+  ERR_STALL = 'ERR_STALL',
+  /** Launcher state prohibits the operation (e.g. tool called while stopped). */
+  ERR_STATE = 'ERR_STATE',
+  /** CODESYS process died while waiting for a result. */
+  ERR_PROCESS_DEAD = 'ERR_PROCESS_DEAD',
+
+  // ─── Project / file ───────────────────────────────────────────────
+  /** Project file not found at the given path. */
+  ERR_PROJECT_NOT_FOUND = 'ERR_PROJECT_NOT_FOUND',
+  /** Project is locked by another process; .lock file present. */
+  ERR_PROJECT_LOCKED = 'ERR_PROJECT_LOCKED',
+  /** Project file is corrupt or unreadable by AB. */
+  ERR_PROJECT_CORRUPT = 'ERR_PROJECT_CORRUPT',
+  /** A POU / object lookup failed (path not in tree). */
+  ERR_OBJECT_NOT_FOUND = 'ERR_OBJECT_NOT_FOUND',
+
+  // ─── Library ──────────────────────────────────────────────────────
+  /** Library is not installed in any repository. */
+  ERR_LIB_NOT_FOUND = 'ERR_LIB_NOT_FOUND',
+  /** Same name+version is already installed (re-install without overwrite). */
+  ERR_LIB_EXISTS = 'ERR_LIB_EXISTS',
+  /** Library parameter name not exposed by the referenced library. */
+  ERR_LIB_PARAM_NOT_FOUND = 'ERR_LIB_PARAM_NOT_FOUND',
+
+  // ─── Online / device ──────────────────────────────────────────────
+  /** Online application failed with "Stack empty" -- IDE context missing. */
+  ERR_ONLINE_STACK_EMPTY = 'ERR_ONLINE_STACK_EMPTY',
+  /** No PLC reachable at the configured gateway/address. */
+  ERR_DEVICE_UNREACHABLE = 'ERR_DEVICE_UNREACHABLE',
+  /** Gateway name could not be resolved to a GUID. */
+  ERR_GATEWAY_UNKNOWN = 'ERR_GATEWAY_UNKNOWN',
+  /** Application not running on PLC (read_variable / write_variable). */
+  ERR_APP_NOT_RUNNING = 'ERR_APP_NOT_RUNNING',
+
+  // ─── Build / compile ──────────────────────────────────────────────
+  /** Compile finished with errors. */
+  ERR_COMPILE_ERROR = 'ERR_COMPILE_ERROR',
+
+  // ─── Scripting API limits ─────────────────────────────────────────
+  /** The CODESYS scripting API on this build does not expose what's needed. */
+  ERR_API_NOT_EXPOSED = 'ERR_API_NOT_EXPOSED',
+  /** Operation is restricted to AB Premium edition. */
+  ERR_PREMIUM_ONLY = 'ERR_PREMIUM_ONLY',
+
+  // ─── Input validation ─────────────────────────────────────────────
+  /** Tool parameter validation failed (missing/invalid). */
+  ERR_BAD_INPUT = 'ERR_BAD_INPUT',
+
+  // ─── Catch-all ────────────────────────────────────────────────────
+  /** Unknown / uncategorized failure. */
+  ERR_UNKNOWN = 'ERR_UNKNOWN',
+}
+
+/**
+ * Marker emitted by Python scripts to surface a structured error code via
+ * stdout. server.ts parses this from result.output. Format:
+ *
+ *     SCRIPT_ERROR_CODE: ERR_PROJECT_LOCKED
+ *
+ * Scripts SHOULD emit this in addition to the existing `SCRIPT_ERROR: ...`
+ * line, NOT instead of -- the human-readable message is still useful.
+ */
+export const SCRIPT_ERROR_CODE_MARKER = 'SCRIPT_ERROR_CODE:';
+
 /** Command file written by Node.js to commands/ directory */
 export interface IpcCommand {
   requestId: RequestId;
@@ -99,6 +182,16 @@ export interface ServerConfig extends LauncherConfig {
   verbose: boolean;
   debug: boolean;
   mode: ExecutionMode;
+  /**
+   * When true (default), destructive tools (set_pou_code, delete_object,
+   * set_project_info, set_task_parameter, install_library_to_repository,
+   * etc.) take a filesystem snapshot of the .project/.library file before
+   * running the underlying IronPython script. Backup files are stored next
+   * to the source as `<path>.backup-YYYYMMDDTHHMMSSZ`. Opt out via CLI
+   * --no-auto-backup. Disk-space management is out of scope -- the user
+   * owns cleanup of accumulated .backup-* files.
+   */
+  autoBackup: boolean;
 }
 
 /** Script template parameters */
