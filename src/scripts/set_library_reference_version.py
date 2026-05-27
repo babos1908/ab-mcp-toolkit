@@ -29,11 +29,19 @@ try:
         print("SCRIPT_ERROR_CODE: ERR_OBJECT_NOT_FOUND")
         raise RuntimeError("Library Manager node not found in project.")
 
-    # Find the named reference.
+    # Find the named reference. Track how many children we enumerate so we
+    # can distinguish "name mismatch" from "enumeration is the Standard
+    # scripting limit" in the error message -- those need different fixes
+    # from the caller.
     target_ref = None
     current_version = None
+    children_enumerated = 0
+    names_seen = []
     for ref in lib_manager_node.get_children(False):
+        children_enumerated += 1
         ref_name = getattr(ref, 'get_name', lambda: '')()
+        if ref_name:
+            names_seen.append(ref_name)
         if ref_name and ref_name.strip().lower() == LIBRARY_NAME.strip().lower():
             target_ref = ref
             for vattr in ('version', 'resolved_version', 'get_version'):
@@ -47,9 +55,31 @@ try:
             break
     if target_ref is None:
         print("SCRIPT_ERROR_CODE: ERR_LIB_NOT_FOUND")
-        raise RuntimeError(
-            "Library reference '%s' not found under Library Manager. Use "
-            "list_project_libraries to confirm exact name." % LIBRARY_NAME)
+        if children_enumerated == 0:
+            # Standard-edition scripting limit: get_children(False) on the
+            # Library Manager yields nothing on this build. Even if the
+            # library IS referenced, we cannot see it from scripting -- the
+            # only fix is AB UI (Library Manager > Properties > Version) or
+            # AB Premium edition.
+            raise RuntimeError(
+                "Library reference '%s' could not be located: Library Manager "
+                "enumeration returned 0 children. This is the AB 2.9 Standard "
+                "scripting limit (the Library Manager does not surface its "
+                "references via get_children on Standard). "
+                "Fallback: AB UI > Library Manager > right-click the reference > "
+                "Properties > set Version explicitly. On AB Premium this tool "
+                "should work directly." % LIBRARY_NAME
+            )
+        else:
+            # Children enumeration worked but name didn't match. Show what we
+            # actually saw so the caller can correct the name.
+            raise RuntimeError(
+                "Library reference '%s' not found under Library Manager. "
+                "Enumerated %d reference(s): %s. Confirm the exact name via "
+                "list_project_libraries / inspect_project_tree, or use the "
+                "fully-qualified form (e.g. 'MyLib, * (Vendor)')." %
+                (LIBRARY_NAME, children_enumerated, names_seen)
+            )
 
     # Probe write paths. Names empirically vary; cascade until one works.
     set_via = None

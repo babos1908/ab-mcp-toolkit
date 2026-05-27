@@ -56,3 +56,60 @@ def emit_result(payload):
     sys.stdout.write(text)
     sys.stdout.write("\n### END_RESULT_JSON ###\n")
     sys.stdout.flush()
+
+
+def safe_online_login(online_app, change_option=None):
+    """Call online_app.login(...) with the right signature for the current
+    CODESYS build.
+
+    Empirical 2026-05-27 (NEXO PLC): on AB 2.9 SP19 the .NET binding rejects
+    the no-arg call with
+        TypeError: login() takes exactly 2 arguments (0 given)
+    because the bound method signature is ILoginManager.Login(bool bForceLogin)
+    plus the implicit self -- so the IronPython-side arity required is 1
+    positional bool. Older CODESYS builds accepted login() with 0 args.
+
+    Strategy: try the change_option variant first when given (TryOnlineChange
+    etc.), then try the 1-arg bool form, then the no-arg form. The first
+    invocation that doesn't raise a TypeError-about-arity wins. Genuine
+    runtime errors (auth refused, project mismatch, ...) propagate normally
+    because they are not TypeError.
+
+    Returns the value login() returned (usually None). Raises the last
+    TypeError if every variant rejected the args, or whatever genuine
+    exception the first variant that accepted the args produced.
+    """
+    if not hasattr(online_app, 'login'):
+        raise TypeError("Online application does not support login().")
+
+    attempts = []
+    if change_option is not None:
+        attempts.append(((change_option,), 'change_option'))
+    # SP19 expects login(bForceLogin: bool). False = do not force when
+    # online change is possible; this matches the UI default behavior.
+    attempts.append(((False,), 'force=False'))
+    attempts.append(((True,), 'force=True'))
+    # Legacy no-arg call (older builds).
+    attempts.append(((), 'no-args'))
+
+    last_arity_err = None
+    for args, label in attempts:
+        try:
+            result = online_app.login(*args)
+            print("DEBUG: safe_online_login: %s succeeded" % label)
+            return result
+        except TypeError as te:
+            # Check if the TypeError is about arity (signature mismatch),
+            # not about something else (e.g. wrong type of change_option).
+            # The IronPython error text is stable: "takes exactly N arguments
+            # (M given)" / "takes N positional arguments but M were given".
+            msg = str(te)
+            if 'argument' in msg.lower() and 'given' in msg.lower():
+                last_arity_err = te
+                continue
+            # Different TypeError -- bubble up.
+            raise
+    raise RuntimeError(
+        "safe_online_login: all signature variants rejected. Last arity error: %s" %
+        last_arity_err
+    )

@@ -73,10 +73,37 @@ export class ScriptManager {
     return scripts.join('\n\n');
   }
 
+  /**
+   * IronPython 2.7 enforces PEP 263: any source file containing a non-ASCII
+   * byte must declare its encoding on line 1 or 2 (e.g. `# -*- coding: utf-8
+   * -*-`). Otherwise a SyntaxError "Non-ASCII character '\xXX' in file ...,
+   * but no encoding declared" is raised before the script runs.
+   *
+   * The repo convention is "scripts must be ASCII-only", but a stray
+   * non-ASCII character in a comment (typically Italian residue from a fix
+   * note) has bricked an entire tool more than once. Defensive fix: prepend
+   * the encoding header to EVERY generated script, unconditionally. The
+   * header is idempotent if the template already has one (we check first to
+   * avoid producing a duplicate).
+   *
+   * The header MUST be on line 1 or 2; we use line 1 since templates do not
+   * own a shebang.
+   */
+  private ensureEncodingHeader(script: string): string {
+    // Look at the first two lines; if either is already a PEP 263 declaration,
+    // leave the script untouched.
+    const firstTwoLines = script.split('\n', 2);
+    const pep263 = /coding[:=]\s*[-\w.]+/;
+    for (const line of firstTwoLines) {
+      if (pep263.test(line)) return script;
+    }
+    return '# -*- coding: utf-8 -*-\n' + script;
+  }
+
   /** Load a template and interpolate parameters */
   prepareScript(name: string, params: ScriptParams): string {
     const template = this.loadTemplate(name);
-    return this.interpolate(template, params);
+    return this.ensureEncodingHeader(this.interpolate(template, params));
   }
 
   /** Prepend helper scripts before the main script, then interpolate all */
@@ -88,6 +115,6 @@ export class ScriptManager {
     const helperContents = helpers.map((h) => this.loadTemplate(h));
     const mainTemplate = this.loadTemplate(name);
     const combined = this.combineScripts(...helperContents, mainTemplate);
-    return this.interpolate(combined, params);
+    return this.ensureEncodingHeader(this.interpolate(combined, params));
   }
 }

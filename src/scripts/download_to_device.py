@@ -8,12 +8,16 @@ MODE = "{MODE}"
 
 
 def _login(online_app, mode):
+    # All login() calls below route through safe_online_login() from
+    # _text_utils.py to handle the V3.5 SP19 arity requirement
+    # (login(bForceLogin: bool) vs legacy login() no-args). See its
+    # docstring for the empirical history.
     if not hasattr(online_app, 'login'):
         raise TypeError("Online application does not support login().")
 
     if mode == 'full':
         # Plain login - no online change attempt.
-        online_app.login()
+        safe_online_login(online_app)
         print("DEBUG: Logged in (full download mode).")
         return
 
@@ -25,12 +29,12 @@ def _login(online_app, mode):
                 "use mode='full' instead."
             )
         # 'auto': no OCO available, plain login is the only path.
-        online_app.login()
+        safe_online_login(online_app)
         print("DEBUG: Logged in (no OnlineChangeOption available).")
         return
 
     try:
-        online_app.login(script_engine.OnlineChangeOption.TryOnlineChange)
+        safe_online_login(online_app, change_option=script_engine.OnlineChangeOption.TryOnlineChange)
         print("DEBUG: Logged in with TryOnlineChange.")
     except Exception as e:
         if mode == 'online_change':
@@ -40,7 +44,7 @@ def _login(online_app, mode):
             )
         # 'auto': fall back to plain login.
         print("DEBUG: TryOnlineChange failed, falling back to full login: %s" % e)
-        online_app.login()
+        safe_online_login(online_app)
 
 
 try:

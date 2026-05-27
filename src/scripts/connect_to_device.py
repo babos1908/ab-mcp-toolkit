@@ -106,8 +106,8 @@ def _prime_online_session(target_app=None):
     'Online > Login' once in the UI fixes it. This helper tries three
     strategies in order, each best-effort:
 
-      1. target_app.online_application (proprietà che ritorna la sessione
-         online corrente se presente). If this returns a non-null object,
+      1. target_app.online_application (property returning the current
+         online session if any). If this returns a non-null object,
          we already have the priming we need -- the caller can re-use it.
          Returns the object if found.
       2. system.commands.find_commands('Online.*') -- mere PRESENCE check
@@ -236,19 +236,19 @@ try:
     app_name = getattr(target_app, 'get_name', lambda: "Unknown")()
 
     print("DEBUG: Calling login() on online application...")
-    if hasattr(online_app, 'login'):
-        if hasattr(script_engine, 'OnlineChangeOption'):
-            try:
-                online_app.login(script_engine.OnlineChangeOption.TryOnlineChange)
-                print("DEBUG: Logged in with TryOnlineChange option.")
-            except Exception as e:
-                print("DEBUG: TryOnlineChange failed, trying plain login: %s" % e)
-                online_app.login()
-        else:
-            online_app.login()
-        print("DEBUG: Login successful.")
+    # safe_online_login() (from _text_utils.py) handles the V3.5 SP19 arity
+    # requirement: login(bForceLogin: bool) vs legacy login() with no args.
+    # See its docstring for the empirical history.
+    if hasattr(script_engine, 'OnlineChangeOption'):
+        try:
+            safe_online_login(online_app, change_option=script_engine.OnlineChangeOption.TryOnlineChange)
+            print("DEBUG: Logged in with TryOnlineChange option.")
+        except Exception as e:
+            print("DEBUG: TryOnlineChange failed, trying plain login: %s" % e)
+            safe_online_login(online_app)
     else:
-        raise TypeError("Online application does not support login().")
+        safe_online_login(online_app)
+    print("DEBUG: Login successful.")
 
     state = "connected"
     if hasattr(online_app, 'application_state'):
