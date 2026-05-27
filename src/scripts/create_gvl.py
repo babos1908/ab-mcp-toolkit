@@ -61,16 +61,20 @@ try:
         # Optionally set declaration code
         if DECLARATION_CONTENT.strip():
             print("DEBUG: Setting GVL declaration code...")
+            # See _text_utils.to_codesys_text for why this decode is required
+            # before writing to .NET text properties (Unicode->NUL corruption
+            # via the System.String binding on raw Python 2.7 bytes).
+            DECLARATION_CONTENT_U = to_codesys_text(DECLARATION_CONTENT)
             if hasattr(new_gvl, 'textual_declaration'):
                 try:
-                    new_gvl.textual_declaration.replace(DECLARATION_CONTENT)
+                    new_gvl.textual_declaration.replace(DECLARATION_CONTENT_U)
                     print("DEBUG: GVL declaration code set successfully.")
                 except Exception as decl_err:
                     print("WARN: Failed to set GVL declaration via textual_declaration.replace: %s" % decl_err)
                     # Try alternative
                     if hasattr(new_gvl.textual_declaration, 'text'):
                         try:
-                            new_gvl.textual_declaration.text = DECLARATION_CONTENT
+                            new_gvl.textual_declaration.text = DECLARATION_CONTENT_U
                             print("DEBUG: GVL declaration code set via .text property.")
                         except Exception as text_err:
                             print("WARN: Failed to set GVL declaration via .text: %s" % text_err)

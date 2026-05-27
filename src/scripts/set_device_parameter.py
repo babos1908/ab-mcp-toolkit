@@ -28,6 +28,10 @@ try:
     set_attempts = []
     success = False
     last_err = None
+    # Decode bytes->unicode before .NET assignment (see _text_utils.to_codesys_text).
+    # Most device parameter values are ASCII (IPs, ints), but a string-typed
+    # parameter with non-ASCII content would hit the same Unicode->NUL bug.
+    VALUE_U = to_codesys_text(VALUE)
 
     # Attempt 1: device.parameter[id].value = ...
     if not success:
@@ -35,7 +39,7 @@ try:
             params = getattr(device, 'parameter', None)
             if params is not None:
                 slot = params[parameter_id]
-                slot.value = VALUE
+                slot.value = VALUE_U
                 success = True
                 set_attempts.append("device.parameter[id].value")
         except Exception as e:
@@ -45,7 +49,7 @@ try:
     # Attempt 2: device.set_parameter_value(id, value)
     if not success and hasattr(device, 'set_parameter_value'):
         try:
-            device.set_parameter_value(parameter_id, VALUE)
+            device.set_parameter_value(parameter_id, VALUE_U)
             success = True
             set_attempts.append("device.set_parameter_value(id, value)")
         except Exception as e:
@@ -57,7 +61,7 @@ try:
         try:
             params = getattr(device, 'parameters', None)
             if params is not None:
-                params[parameter_id] = VALUE
+                params[parameter_id] = VALUE_U
                 success = True
                 set_attempts.append("device.parameters[id] = value")
         except Exception as e:

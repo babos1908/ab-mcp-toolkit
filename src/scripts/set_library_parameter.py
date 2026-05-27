@@ -122,19 +122,24 @@ try:
             "Parameter '%s' not exposed by library '%s'." % (PARAMETER_NAME, LIBRARY_NAME))
 
     # Write the value. Try multiple set/property patterns.
+    # Decode bytes->unicode before writing -- prevents Unicode->NUL
+    # corruption through the System.String binding when the value contains
+    # non-ASCII chars (e.g. a STRING(N) library parameter with unicode
+    # content). See _text_utils.to_codesys_text.
+    PARAMETER_VALUE_U = to_codesys_text(PARAMETER_VALUE)
     written = False
     last_err = None
     # 1. slot.value = X
     if not written and hasattr(target_slot, 'value'):
         try:
-            target_slot.value = PARAMETER_VALUE
+            target_slot.value = PARAMETER_VALUE_U
             written = True
         except Exception as e:
             last_err = "slot.value=...: %s: %s" % (type(e).__name__, e)
     # 2. slot.set_value(X)
     if not written and hasattr(target_slot, 'set_value'):
         try:
-            target_slot.set_value(PARAMETER_VALUE)
+            target_slot.set_value(PARAMETER_VALUE_U)
             written = True
         except Exception as e:
             last_err = (last_err or '') + " | slot.set_value(): %s: %s" % (type(e).__name__, e)

@@ -18,6 +18,18 @@ try:
     target_name = getattr(target_object, 'get_name', lambda: POU_FULL_PATH)()
     print("DEBUG: Found target object: %s" % target_name)
 
+    # Decode the incoming bytes->unicode BEFORE writing to .NET text props.
+    # Empirical 2026-05-27 (NEXO PLC): non-ASCII chars (e.g. U+2500 box
+    # drawing, U+2014 em-dash) in comments were silently corrupted to NUL
+    # bytes when the raw Python 2.7 `str` (containing UTF-8 bytes) was
+    # assigned to obj.textual_declaration.text -- the System.String binding
+    # misinterpreted control-range bytes. The CODESYS tokenizer then exited
+    # the comment scanner early on the first NUL and skipped any struct
+    # fields declared after the affected line. See _text_utils.to_codesys_text
+    # for the full diagnosis.
+    DECLARATION_CONTENT_U = to_codesys_text(DECLARATION_CONTENT)
+    IMPLEMENTATION_CONTENT_U = to_codesys_text(IMPLEMENTATION_CONTENT)
+
     # --- Set Declaration Part ---
     declaration_updated = False
     if UPDATE_DECL_FLAG == "1":
@@ -26,7 +38,7 @@ try:
             if decl_obj and hasattr(decl_obj, 'replace'):
                 try:
                     print("DEBUG: Accessing textual_declaration...")
-                    decl_obj.replace(DECLARATION_CONTENT)
+                    decl_obj.replace(DECLARATION_CONTENT_U)
                     print("DEBUG: Set declaration text using replace().")
                     declaration_updated = True
                 except Exception as decl_err:
@@ -48,7 +60,7 @@ try:
             if impl_obj and hasattr(impl_obj, 'replace'):
                 try:
                     print("DEBUG: Accessing textual_implementation...")
-                    impl_obj.replace(IMPLEMENTATION_CONTENT)
+                    impl_obj.replace(IMPLEMENTATION_CONTENT_U)
                     print("DEBUG: Set implementation text using replace().")
                     implementation_updated = True
                 except Exception as impl_err:

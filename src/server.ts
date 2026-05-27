@@ -181,6 +181,7 @@ const MCP_PATCHES: Array<{ id: string; description: string }> = [
   { id: 'pep263-encoding-injection', description: 'ScriptManager defensively prepends `# -*- coding: utf-8 -*-` to every generated script (idempotent) so a stray non-ASCII comment cannot break IronPython parsing' },
   { id: 'safe-online-login', description: 'safe_online_login() helper probes login() signature variants (change_option / force=True/False / no-args) — fixes SP19 `login() takes 2 arguments (0 given)` regression' },
   { id: 'set-library-reference-version-better-error', description: 'set_library_reference_version distinguishes 0-children (Standard limit -> AB UI fallback hint) from name-typo (shows enumerated names) in ERR_LIB_NOT_FOUND' },
+  { id: 'unicode-text-decode', description: 'to_codesys_text() helper decodes bytes->unicode before assigning to .NET String properties (textual_declaration / textual_implementation / project_info / library_parameter / device_parameter). Prevents silent Unicode->NUL corruption (U+2500 box-drawing, U+2014 em-dash, etc.) that broke compile downstream when struct fields followed the corrupted comment line' },
 ];
 
 /** Read the MCP package.json version. Cached after first call. */

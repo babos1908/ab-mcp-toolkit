@@ -73,9 +73,13 @@ try:
             skipped.append({'field': label, 'reason': 'attribute_not_found', 'tried': list(attrs)})
             continue
         try:
-            setattr(info, target_attr, value)
-            applied.append({'field': label, 'attribute': target_attr, 'new_value': value})
-            print("DEBUG: info.%s = %r" % (target_attr, value))
+            # Decode bytes->unicode before writing to .NET String binding;
+            # otherwise non-ASCII chars in author/company/description get
+            # corrupted to NUL (see _text_utils.to_codesys_text).
+            value_u = to_codesys_text(value)
+            setattr(info, target_attr, value_u)
+            applied.append({'field': label, 'attribute': target_attr, 'new_value': value_u})
+            print("DEBUG: info.%s = %r" % (target_attr, value_u))
         except Exception as set_err:
             skipped.append({'field': label, 'reason': 'setattr_failed', 'error': str(set_err)})
 

@@ -58,6 +58,48 @@ def emit_result(payload):
     sys.stdout.flush()
 
 
+def to_codesys_text(value):
+    """Convert a Python value to a unicode object safe to assign to CODESYS
+    .NET text properties (e.g. textual_declaration.text).
+
+    Empirical 2026-05-27 (NEXO PLC): assigning a Python 2.7 `str` containing
+    raw UTF-8 bytes to `obj.textual_declaration.text` causes a byte-level
+    misinterpretation through the System.String binding. Control-range bytes
+    (0x00-0x1f) end up persisted as NUL in the project file; the CODESYS
+    tokenizer then exits the comment scanner early on the first NUL, and
+    any struct fields declared AFTER the affected comment are silently
+    skipped during compilation. Symptom: compile_project reports
+    "'fieldname' is no component of 'StructName'" even though search_code
+    shows the field IS in the source text.
+
+    Pipeline that produces the bug:
+        Node writes a .py file as UTF-8 bytes.
+        IronPython reads the file with open(path, 'r') -> str (bytes).
+        exec(script_code) is run on a Python str argument; PEP 263 does
+        NOT apply to bytes passed to exec (only to file imports), so the
+        string literal `"\xe2\x94\x80"` (3 UTF-8 bytes for U+2500) stays
+        as raw bytes in the Python value -- not decoded.
+        Assignment to .NET System.String (UTF-16) misinterprets the bytes.
+
+    Fix: explicitly decode the bytes as UTF-8 here, so what reaches the
+    .NET String binding is a true unicode object with the right code points.
+    Falls back to 'replace' error handler if the input contains bytes that
+    aren't valid UTF-8, so a malformed input never crashes the entire tool.
+    """
+    if value is None:
+        return u''
+    if isinstance(value, unicode):
+        return value
+    # Bytes path: try UTF-8 decode (the encoding the Node side wrote with).
+    # On failure, replace invalid sequences with the Unicode replacement
+    # char rather than raising; the alternative is to crash the whole
+    # script over a stray byte that was never going to be valid anyway.
+    try:
+        return value.decode('utf-8')
+    except UnicodeDecodeError:
+        return value.decode('utf-8', 'replace')
+
+
 def safe_online_login(online_app, change_option=None):
     """Call online_app.login(...) with the right signature for the current
     CODESYS build.
