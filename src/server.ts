@@ -1205,6 +1205,139 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
   );
 
   s.tool(
+    'export_project_to_plcopen_xml',
+    "Export the project's POUs/DUTs/GVLs to a PLCopen XML file via project.export_plcopenxml(). Equivalent to AB UI 'File > Export PLCopen XML...'. Use as a precursor to the offline / diff tools that need XML input (.project files are binary). Probes export_plcopenxml signature variants since the .NET binding accepts varying numbers of args across CODESYS V3.5 SPxx builds.",
+    {
+      projectFilePath: z.string().describe("Path to the .project or .library file to export."),
+      outputXmlPath: z.string().min(1).describe("Path where the .xml file will be written. Parent directory is auto-created."),
+      applicationOnly: z.boolean().describe("If true, export only the active application's tree (smaller, recommended). If false, project-level export including non-application objects.").optional(),
+      includeLibraries: z.boolean().describe("If true, recurse into referenced libraries and include their content (heavy; rarely needed). Default false.").optional(),
+    },
+    async (args: { projectFilePath: string; outputXmlPath: string; applicationOnly?: boolean; includeLibraries?: boolean }) => {
+      const escapedProj = resolvePath(args.projectFilePath, workspaceDir);
+      const escapedOut = resolvePath(args.outputXmlPath, workspaceDir);
+      const script = scriptManager.prepareScriptWithHelpers(
+        'export_project_to_plcopen_xml',
+        {
+          PROJECT_FILE_PATH: escapedProj,
+          OUTPUT_XML_PATH: escapedOut,
+          APPLICATION_ONLY: args.applicationOnly !== false ? 'true' : 'false',
+          INCLUDE_LIBRARIES: args.includeLibraries === true ? 'true' : 'false',
+        },
+        ['_text_utils', 'ensure_project_open']
+      );
+      const result = await executor.executeScript(script, 180_000); // big projects can take a while
+      return formatStructuredResponse(result, `PLCopen XML exported to ${args.outputXmlPath}.`);
+    }
+  );
+
+  s.tool(
+    'diff_libraries_via_export',
+    "Compose-tool: opens libraryA, exports PLCopen XML, closes; opens libraryB, exports XML, closes; runs the structured diff on the two XML files. Solves the binary-format limitation of diff_library_versions in one tool call. SLOW (~30-90s) because it round-trips through CODESYS for both exports. xmlOutputDir (optional) keeps the intermediate XML files for inspection; omit to use %TEMP%.",
+    {
+      sourceLibraryPath: z.string().min(1).describe("Path to the OLDER .library file."),
+      targetLibraryPath: z.string().min(1).describe("Path to the NEWER .library file."),
+      xmlOutputDir: z.string().describe("Optional directory to keep the intermediate XML exports. Defaults to %TEMP%.").optional(),
+      keepXml: z.boolean().describe("If true, keep the intermediate XML files after diffing (default true when xmlOutputDir is set, false otherwise).").optional(),
+    },
+    async (args: { sourceLibraryPath: string; targetLibraryPath: string; xmlOutputDir?: string; keepXml?: boolean }) => {
+      const srcLib = resolvePath(args.sourceLibraryPath, workspaceDir);
+      const tgtLib = resolvePath(args.targetLibraryPath, workspaceDir);
+      const xmlDir = args.xmlOutputDir
+        ? resolvePath(args.xmlOutputDir, workspaceDir)
+        : require('os').tmpdir();
+      const keep = args.keepXml ?? !!args.xmlOutputDir;
+      const ts = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 15);
+      const srcXml = path.join(xmlDir, `diff-source-${ts}.xml`);
+      const tgtXml = path.join(xmlDir, `diff-target-${ts}.xml`);
+
+      const steps: Array<{ step: string; ok: boolean; detail: string }> = [];
+
+      const runExport = async (libPath: string, xmlPath: string, label: string): Promise<boolean> => {
+        try {
+          // Open / ensure the library is current.
+          const openScript = scriptManager.prepareScriptWithHelpers(
+            'open_project', { PROJECT_FILE_PATH: libPath }, ['_text_utils', 'ensure_project_open']
+          );
+          await executor.executeScript(openScript);
+          // Export.
+          const expScript = scriptManager.prepareScriptWithHelpers(
+            'export_project_to_plcopen_xml',
+            {
+              PROJECT_FILE_PATH: libPath,
+              OUTPUT_XML_PATH: xmlPath,
+              APPLICATION_ONLY: 'false',
+              INCLUDE_LIBRARIES: 'false',
+            },
+            ['_text_utils', 'ensure_project_open']
+          );
+          const r = await executor.executeScript(expScript, 180_000);
+          const ok = r.success && r.output.includes('SCRIPT_SUCCESS');
+          steps.push({ step: `export_${label}`, ok, detail: ok ? `exported to ${xmlPath}` : r.output.slice(-400) });
+          if (!ok) return false;
+          // Close (force=true so we don't accidentally save anything).
+          const closeScript = scriptManager.prepareScript('close_project', { PROJECT_FILE_PATH: libPath, FORCE: 'true' });
+          try { await executor.executeScript(closeScript); } catch { /* ignore close errors */ }
+          return true;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          steps.push({ step: `export_${label}`, ok: false, detail: msg });
+          return false;
+        }
+      };
+
+      const srcOk = await runExport(srcLib, srcXml, 'source');
+      if (!srcOk) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ diffed: false, steps }, null, 2) }],
+          isError: true,
+        };
+      }
+      const tgtOk = await runExport(tgtLib, tgtXml, 'target');
+      if (!tgtOk) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ diffed: false, steps }, null, 2) }],
+          isError: true,
+        };
+      }
+
+      // Run the XML diff.
+      let diff;
+      try {
+        diff = diffLibraryFiles(srcXml, tgtXml);
+        steps.push({ step: 'diff', ok: true, detail: `diff produced` });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        steps.push({ step: 'diff', ok: false, detail: msg });
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ diffed: false, steps }, null, 2) }],
+          isError: true,
+        };
+      }
+
+      // Cleanup XML files if not requested to keep.
+      if (!keep) {
+        try { fs.unlinkSync(srcXml); } catch { /* ignore */ }
+        try { fs.unlinkSync(tgtXml); } catch { /* ignore */ }
+      }
+
+      const payload: { diffed: boolean; diff: typeof diff; intermediateXml?: { source: string; target: string }; steps: typeof steps } = {
+        diffed: true,
+        diff,
+        steps,
+      };
+      if (keep) {
+        payload.intermediateXml = { source: srcXml, target: tgtXml };
+      }
+
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(payload, null, 2) }],
+        isError: false,
+      };
+    }
+  );
+
+  s.tool(
     'diff_library_versions',
     "Compare two PLCopen XML exports of a library (or two snapshots across versions) and return a structured diff: POUs/GVLs/DUTs added/removed/modified, library references added/removed/version-changed, Project Information field changes. **IMPORTANT**: Native CODESYS .library files are binary and unsupported. First export PLCopen XML from each version's library (File > Export PLCopen XML... in AB), then diff the XML files. Useful for release notes auto-generation, pre-install validation, and 'what changed' investigations across versions.",
     {

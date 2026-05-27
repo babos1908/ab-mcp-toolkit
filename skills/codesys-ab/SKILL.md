@@ -99,7 +99,9 @@ Una sola volta per sessione (o dopo `shutdown_codesys`). Serve all'utente per ve
 - `set_library_reference_version(projectFilePath, libraryName, version)` → pin/update versione library reference. Cascade through set_version() / version= / remove+add (last drops overrides).
 - `rebuild_library(libraryProjectFilePath, regenerateCompiledArtifacts?)` → full rebuild library: clean + check_all_pool_objects + tentativo regen compiled artifacts. Su Standard la regen artifacts spesso fallisce con ERR_API_NOT_EXPOSED (soft warning, source rebuild funziona).
 - `release_library_version(libraryProjectFilePath, version, distFolder?, gitTag?, ghRelease?)` → orchestratore release: set_project_info → rebuild → install → copy a distFolder → opzionale git tag + gh release.
-- `diff_library_versions(sourceLibraryPath, targetLibraryPath)` → diff strutturato tra 2 versioni library. **Richiede PLCopen XML export** (.library nativo è binary); usa AB > File > Export PLCopen XML... prima.
+- `diff_library_versions(sourceLibraryPath, targetLibraryPath)` → diff strutturato tra 2 versioni library da **XML** (no AB needed). Per file `.library` nativi (binary), usa `diff_libraries_via_export` invece.
+- `diff_libraries_via_export(sourceLibraryPath, targetLibraryPath, xmlOutputDir?, keepXml?)` → composite tool: apre lib A, export PLCopen XML, chiude; apre lib B, export, chiude; diff. **Risolve il problema "file .library è binary"** automatizzando il workflow export→diff in un solo tool call. ~30-90s perché round-trip AB 2 volte.
+- `export_project_to_plcopen_xml(projectFilePath, outputXmlPath, applicationOnly?, includeLibraries?)` → wrap esplicito di `project.export_plcopenxml(...)`. Standalone (per chi vuole l'XML da usare con altri strumenti, non solo diff).
 
 ### Task Configuration (AC500)
 - `get_task_configuration(projectFilePath)` → lista Task Configuration node + child tasks con cycle time, priority, watchdog, stack size correnti.
@@ -154,6 +156,45 @@ result = compile_project(path)
 # ritorno: "Compilation complete... N error(s), M warning(s)"
 if N > 0:
     msgs = get_compile_messages(path)   # dettaglio per debug
+```
+
+### Workflow release library v1.0.x
+```
+1. set_project_info(libPath, version='1.0.11')
+2. rebuild_library(libPath)
+3. install_library_to_repository(libPath)
+4. (in consumer) reset_library_parameter(...) for any stale overrides
+5. (in consumer) compile_project + download
+# Tutto orchestrato in uno step:
+release_library_version(libPath, '1.0.11', distFolder='./dist', gitTag=true)
+```
+
+### Diff fra 2 versioni library (.library è binary!)
+```
+# .library files sono in formato binary CODESYS — diff_library_versions DA SOLO
+# non funziona su quelli. Due strade:
+
+# A) Composite tool (single call, ~30-90s):
+diff_libraries_via_export(
+    sourceLibraryPath='dist/v1.0.5/NexoMqttLib-v1.0.5.library',
+    targetLibraryPath='dist/v1.0.10/NexoMqttLib-v1.0.10.library'
+)
+
+# B) Manuale due step (utile se l'XML serve anche per altri usi):
+export_project_to_plcopen_xml('dist/v1.0.5/lib.library', 'dist/v1.0.5/lib.xml')
+export_project_to_plcopen_xml('dist/v1.0.10/lib.library', 'dist/v1.0.10/lib.xml')
+diff_library_versions('dist/v1.0.5/lib.xml', 'dist/v1.0.10/lib.xml')
+```
+
+### Debugging "consumer vede valore stale" della library
+```
+# Sintomo: edit lib v1.0.x → install → consumer compile → runtime cap = vecchio valore
+# Root cause #1 più comune: consumer-side parameter override stale.
+get_library_parameters(consumerPath, 'NexoMqttLib')
+# Cerca isOverridden=true con value != defaultValue → quello è il problema.
+reset_library_parameter(consumerPath, 'NexoMqttLib', 'GC_MAX_TAG_DEFINITIONS')
+# Root cause #2: lib repo cache stale → list_library_repository per confermare versione installata.
+# Root cause #3: compile cache stale → clean_project(consumerPath).
 ```
 
 ### Path conventions
