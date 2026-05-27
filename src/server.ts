@@ -154,6 +154,33 @@ const MCP_PATCHES: Array<{ id: string; description: string }> = [
   { id: 'auto-recovery', description: 'ResilientExecutor auto-triggers forceReset on 2 consecutive timeouts and retries' },
   { id: 'structured-json-responses', description: 'get_project_info / get_task_configuration return parsed JSON payload via formatStructuredResponse' },
   { id: 'mcp-error-codes', description: 'MCPErrorCode enum + SCRIPT_ERROR_CODE: marker in script outputs' },
+  // ─── Round 3 phase B: library repository visibility ──────────────
+  { id: 'list-library-repository', description: 'list_library_repository / uninstall_library_from_repository tools (per-repo enumeration + name extraction fallback)' },
+  { id: 'library-parameters', description: 'get_library_parameters / set_library_parameter / reset_library_parameter (probe-driven; gracefully reports API-not-exposed)' },
+  { id: 'library-parameters-export-import', description: 'export_library_parameters / import_library_parameters round-trip via JSON' },
+  { id: 'rebuild-library', description: 'rebuild_library with compiled-artifact regen attempt (soft warning on ERR_API_NOT_EXPOSED Standard)' },
+  { id: 'diff-library-versions', description: 'diff_library_versions tool (pure-Node parser, no AB needed) for PLCopen XML inputs' },
+  // ─── Round 3 phase C: workflow tools ─────────────────────────────
+  { id: 'clean-project', description: 'clean_project tool: target_app.clean() + .precompilecache / .compileinfo / .bootinfo eviction' },
+  { id: 'set-library-reference-version', description: 'set_library_reference_version tool (pin/update lib ref version with backup)' },
+  { id: 'release-library-version', description: 'release_library_version composite: set_project_info + rebuild + install + copy-to-dist + optional git tag / gh release' },
+  { id: 'inspect-project-tree', description: 'inspect_project_tree unified JSON dump (devices/libraries/pous/gvls/duts/folders/tasks + counts + countsHint)' },
+  { id: 'create-ac500-project', description: 'create_ac500_project bootstrap (copy AC500 V3 template + addLibraries)' },
+  // ─── Round 3 phase D-E: online priming + offline parsing ─────────
+  { id: 'online-application-reuse-probe', description: 'ensure_online_connection probes 4 hosts x 6 attrs for target_app.online_application reuse (Premium-only path)' },
+  { id: 'get-pou-dependency-graph', description: 'get_pou_dependency_graph: directed call graph + dead-code detection from rootPOU' },
+  { id: 'offline-parsing', description: 'get_all_pou_code_offline / search_code_offline pure-Node parsers (PLCopen XML inputs, no AB required)' },
+  // ─── Round 3 export workflow ─────────────────────────────────────
+  { id: 'export-project-to-plcopen-xml', description: 'export_project_to_plcopen_xml standalone tool wrapping project.export_plcopenxml()' },
+  { id: 'diff-libraries-via-export', description: 'diff_libraries_via_export composite: open libA + export + close x2 + diff_library_versions (solves .library binary format)' },
+  // ─── Round 3 follow-up fixes (empirical from NEXO PLC testing) ───
+  { id: 'ensure-project-open-skip-when-primary', description: 'ensure_project_open returns primary unchanged when path matches (unlocks runtime ops after UI Online Login takes the .lock)' },
+  { id: 'list-library-repository-diagnostic', description: 'list_library_repository diagnostic dump (first-entry type + hasattr probe) when API enumeration yields 0 surfaced libraries' },
+  { id: 'inspect-tree-kind-normalization', description: 'inspect_project_tree: normalize node-name match (LibraryManager / TaskConfiguration) by stripping spaces+underscores both sides; extended countsHint to gvls/duts/tasks' },
+  { id: 'gateway-resolver-none-on-unavailable', description: 'connect_to_device gateway resolver returns None when communication_manager unavailable (skips set_gateway_and_address instead of passing the friendly name and getting a cryptic GUID error)' },
+  { id: 'pep263-encoding-injection', description: 'ScriptManager defensively prepends `# -*- coding: utf-8 -*-` to every generated script (idempotent) so a stray non-ASCII comment cannot break IronPython parsing' },
+  { id: 'safe-online-login', description: 'safe_online_login() helper probes login() signature variants (change_option / force=True/False / no-args) — fixes SP19 `login() takes 2 arguments (0 given)` regression' },
+  { id: 'set-library-reference-version-better-error', description: 'set_library_reference_version distinguishes 0-children (Standard limit -> AB UI fallback hint) from name-typo (shows enumerated names) in ERR_LIB_NOT_FOUND' },
 ];
 
 /** Read the MCP package.json version. Cached after first call. */
