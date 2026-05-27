@@ -14,6 +14,7 @@ import { HeadlessExecutor } from './headless';
 import { ScriptManager } from './script-manager';
 import { ExecutorProxy, ResilientExecutor } from './executor-proxy';
 import { BackupManager } from './backup-manager';
+import { diffLibraryFiles } from './library-diff';
 import { parseResultJson } from './result-parser';
 import { serverLog, setLogLevel } from './logger';
 
@@ -915,6 +916,59 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       }
 
       return { content: [{ type: 'text' as const, text: message }], isError };
+    }
+  );
+
+  s.tool(
+    'rebuild_library',
+    "Force a full rebuild of a .library project. Runs target_app.clean() (cache invalidation) + check_all_pool_objects() (source-level semantic check) and, when regenerateCompiledArtifacts=true (default), attempts to regenerate the compiled-library artifacts embedded in the .library project file -- mirrors the AB UI 'Build > Generate Library'. The compiled-artifact regeneration is best-effort: not all CODESYS builds expose generate_compiled_library() and the tool surfaces ERR_API_NOT_EXPOSED with a SOFT warning (source rebuild still succeeded) when not available.",
+    {
+      libraryProjectFilePath: z.string().describe("Path to the .library project file to rebuild."),
+      regenerateCompiledArtifacts: z.boolean().describe("If true (default), also attempt to regenerate compiled-library artifacts inside the .library file.").optional(),
+    },
+    async (args: { libraryProjectFilePath: string; regenerateCompiledArtifacts?: boolean }) => {
+      const escaped = resolvePath(args.libraryProjectFilePath, workspaceDir);
+      const regen = args.regenerateCompiledArtifacts !== false;
+      const script = scriptManager.prepareScriptWithHelpers(
+        'rebuild_library',
+        {
+          PROJECT_FILE_PATH: escaped,
+          REGENERATE_ARTIFACTS: regen ? 'true' : 'false',
+        },
+        ['_text_utils', 'ensure_project_open']
+      );
+      await backupManager.snapshot(escaped);
+      const result = await executor.executeScript(script, 180_000); // 3 min for big libs
+      return formatStructuredResponse(
+        result,
+        `Library rebuild requested for ${args.libraryProjectFilePath}.`
+      );
+    }
+  );
+
+  s.tool(
+    'diff_library_versions',
+    "Compare two .library files (or two snapshots of the same library across versions) and return a structured diff: POUs/GVLs/DUTs added/removed/modified, library references added/removed/version-changed, and Project Information field changes. Pure parsing -- does NOT need CODESYS / AB running. Useful for release notes auto-generation, pre-install validation, and 'what changed since v1.0.5' investigations.",
+    {
+      sourceLibraryPath: z.string().min(1).describe("Path to the OLDER .library file (the 'from' side)."),
+      targetLibraryPath: z.string().min(1).describe("Path to the NEWER .library file (the 'to' side)."),
+    },
+    async (args: { sourceLibraryPath: string; targetLibraryPath: string }) => {
+      try {
+        const a = resolvePath(args.sourceLibraryPath, workspaceDir);
+        const b = resolvePath(args.targetLibraryPath, workspaceDir);
+        const diff = diffLibraryFiles(a, b);
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify(diff, null, 2) }],
+          isError: false,
+        };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: 'text' as const, text: `diff_library_versions failed: ${msg}` }],
+          isError: true,
+        };
+      }
     }
   );
 
@@ -2133,6 +2187,180 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         result,
         `Library installed to repository: ${args.libraryProjectFilePath}` +
         (args.repositoryName ? ` (target: ${args.repositoryName})` : '')
+      );
+    }
+  );
+
+  s.tool(
+    'list_library_repository',
+    "Enumerate libraries installed in the CODESYS Library Repository (the System / User / Default repos). Returns one JSON entry per repository containing its libraries with name, version, company, location. Use to verify which versions are installed before/after install_library_to_repository or uninstall_library_from_repository -- saves the round-trip to 'Tools > Library Repository' in the AB UI.",
+    {
+      nameFilter: z.string().describe("Optional case-insensitive substring filter on library name (e.g. 'Nexo' returns only libs whose name contains 'Nexo').").optional(),
+    },
+    async (args: { nameFilter?: string }) => {
+      const script = scriptManager.prepareScriptWithHelpers(
+        'list_library_repository',
+        { NAME_FILTER: (args.nameFilter ?? '').trim() },
+        ['_text_utils']
+      );
+      const result = await executor.executeScript(script);
+      return formatStructuredResponse(result, 'Library repository enumerated.');
+    }
+  );
+
+  s.tool(
+    'get_library_parameters',
+    "Returns the Library Parameters (consumer-overridable VAR_GLOBAL CONSTANT values from Parameter List POUs) exposed by each library reference in the project's Library Manager. For each parameter: name, current effective value, library default value, isOverridden flag, type, comment. Use to diagnose 'consumer override vs lib default' confusion: if isOverridden=true but the override is stale relative to the new library default, call reset_library_parameter. Returns a diagnostic dump if the CODESYS scripting API on this build does not expose parameter access (worth forwarding to maintainers).",
+    {
+      projectFilePath: z.string().describe("Path to the consumer .project file."),
+      libraryName: z.string().describe("Optional library name filter (e.g. 'NexoMqttLib'). Case-insensitive substring match.").optional(),
+    },
+    async (args: { projectFilePath: string; libraryName?: string }) => {
+      const escaped = resolvePath(args.projectFilePath, workspaceDir);
+      const script = scriptManager.prepareScriptWithHelpers(
+        'get_library_parameters',
+        {
+          PROJECT_FILE_PATH: escaped,
+          LIBRARY_NAME: (args.libraryName ?? '').trim(),
+        },
+        ['_text_utils', 'ensure_project_open']
+      );
+      const result = await executor.executeScript(script);
+      return formatStructuredResponse(result, 'Library parameters enumerated.');
+    }
+  );
+
+  s.tool(
+    'set_library_parameter',
+    "Set a consumer-side override for a Library Parameter (overrides the library's default VAR_GLOBAL CONSTANT value). Persists in the consumer .project file. Use to pin a value the library default doesn't match (e.g. raise GC_MAX_TAG_DEFINITIONS). For the canonical value declared by the library itself, edit the Parameter List POU in the library source instead.",
+    {
+      projectFilePath: z.string().describe("Path to the consumer .project file."),
+      libraryName: z.string().min(1).describe("Library name (must match a Library Manager reference)."),
+      parameterName: z.string().min(1).describe("Parameter name (e.g. 'GC_MAX_TAG_DEFINITIONS')."),
+      value: z.string().describe("New value as a string (e.g. '1024', 'TRUE', \"'foo'\"). Use the IEC literal form the parameter expects."),
+    },
+    async (args: { projectFilePath: string; libraryName: string; parameterName: string; value: string }) => {
+      const escaped = resolvePath(args.projectFilePath, workspaceDir);
+      const script = scriptManager.prepareScriptWithHelpers(
+        'set_library_parameter',
+        {
+          PROJECT_FILE_PATH: escaped,
+          LIBRARY_NAME: args.libraryName.trim(),
+          PARAMETER_NAME: args.parameterName.trim(),
+          PARAMETER_VALUE: args.value,
+        },
+        ['_text_utils', 'ensure_project_open']
+      );
+      await backupManager.snapshot(escaped);
+      const result = await executor.executeScript(script);
+      return formatStructuredResponse(
+        result,
+        `Library parameter override set: ${args.libraryName}.${args.parameterName} = ${args.value}.`
+      );
+    }
+  );
+
+  s.tool(
+    'reset_library_parameter',
+    "Remove the consumer-side override for a Library Parameter, falling back to the library's default value. Use when a stale override from an old library version is silently masking a default change (the canonical cause of 'why is my consumer still seeing the old value' debugging spirals).",
+    {
+      projectFilePath: z.string().describe("Path to the consumer .project file."),
+      libraryName: z.string().min(1).describe("Library name."),
+      parameterName: z.string().min(1).describe("Parameter name to reset."),
+    },
+    async (args: { projectFilePath: string; libraryName: string; parameterName: string }) => {
+      const escaped = resolvePath(args.projectFilePath, workspaceDir);
+      const script = scriptManager.prepareScriptWithHelpers(
+        'reset_library_parameter',
+        {
+          PROJECT_FILE_PATH: escaped,
+          LIBRARY_NAME: args.libraryName.trim(),
+          PARAMETER_NAME: args.parameterName.trim(),
+        },
+        ['_text_utils', 'ensure_project_open']
+      );
+      await backupManager.snapshot(escaped);
+      const result = await executor.executeScript(script);
+      return formatStructuredResponse(
+        result,
+        `Library parameter override reset: ${args.libraryName}.${args.parameterName}.`
+      );
+    }
+  );
+
+  s.tool(
+    'export_library_parameters',
+    "Export the consumer-side Library Parameter values to a JSON file. Useful for replicating a consumer's parameter config across projects or stashing a baseline before mass-editing. By default exports ALL parameters with their current value + isOverridden flag; pair with import_library_parameters to restore.",
+    {
+      projectFilePath: z.string().describe("Path to the source consumer .project file."),
+      outputPath: z.string().min(1).describe("Path where the JSON export will be written. Overwritten if exists."),
+      libraryName: z.string().describe("Optional library name filter (case-insensitive substring).").optional(),
+    },
+    async (args: { projectFilePath: string; outputPath: string; libraryName?: string }) => {
+      const escapedProj = resolvePath(args.projectFilePath, workspaceDir);
+      const escapedOut = resolvePath(args.outputPath, workspaceDir);
+      const script = scriptManager.prepareScriptWithHelpers(
+        'export_library_parameters',
+        {
+          PROJECT_FILE_PATH: escapedProj,
+          OUTPUT_PATH: escapedOut,
+          LIBRARY_NAME: (args.libraryName ?? '').trim(),
+        },
+        ['_text_utils', 'ensure_project_open']
+      );
+      const result = await executor.executeScript(script);
+      return formatStructuredResponse(result, `Library parameters exported to ${args.outputPath}.`);
+    }
+  );
+
+  s.tool(
+    'import_library_parameters',
+    "Import Library Parameter values from a JSON file (produced by export_library_parameters) into a consumer project. By default applies only entries that were marked isOverridden=true in the export (skipping defaults that the library already provides); set skipDefaults=false to import every entry blindly. Returns per-parameter applied/skipped/failed lists for review.",
+    {
+      projectFilePath: z.string().describe("Path to the target consumer .project file."),
+      inputPath: z.string().min(1).describe("Path to the JSON export to import."),
+      skipDefaults: z.boolean().describe("If true (default), skip entries whose isOverridden was false in the export.").optional(),
+    },
+    async (args: { projectFilePath: string; inputPath: string; skipDefaults?: boolean }) => {
+      const escapedProj = resolvePath(args.projectFilePath, workspaceDir);
+      const escapedIn = resolvePath(args.inputPath, workspaceDir);
+      const script = scriptManager.prepareScriptWithHelpers(
+        'import_library_parameters',
+        {
+          PROJECT_FILE_PATH: escapedProj,
+          INPUT_PATH: escapedIn,
+          SKIP_DEFAULTS: args.skipDefaults === false ? 'false' : 'true',
+        },
+        ['_text_utils', 'ensure_project_open']
+      );
+      await backupManager.snapshot(escapedProj);
+      const result = await executor.executeScript(script);
+      return formatStructuredResponse(result, `Library parameters imported from ${args.inputPath}.`);
+    }
+  );
+
+  s.tool(
+    'uninstall_library_from_repository',
+    "Remove a library version from the CODESYS Library Repository. Pass '*' as version to remove ALL versions of the named library. Use after release iteration to clean up superseded versions (e.g. uninstall v1.0.5 once v1.0.10 is installed and validated). Returns ERR_LIB_NOT_FOUND if no matching entry; safe to call on already-uninstalled libraries.",
+    {
+      libraryName: z.string().min(1).describe("Library name (e.g. 'NexoMqttLib'). Case-insensitive."),
+      version: z.string().min(1).describe("Version string to uninstall (e.g. '1.0.10') or '*' for all versions."),
+      repositoryName: z.string().describe("Optional repository name (e.g. 'System', 'User'). If omitted, matches across all repositories.").optional(),
+    },
+    async (args: { libraryName: string; version: string; repositoryName?: string }) => {
+      const script = scriptManager.prepareScriptWithHelpers(
+        'uninstall_library_from_repository',
+        {
+          LIBRARY_NAME: args.libraryName.trim(),
+          LIBRARY_VERSION: args.version.trim(),
+          REPOSITORY_NAME: (args.repositoryName ?? '').trim(),
+        },
+        ['_text_utils']
+      );
+      const result = await executor.executeScript(script);
+      return formatStructuredResponse(
+        result,
+        `Library uninstall request processed for ${args.libraryName} ${args.version}.`
       );
     }
   );
