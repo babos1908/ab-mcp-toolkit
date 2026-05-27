@@ -42,21 +42,27 @@ Una sola volta per sessione (o dopo `shutdown_codesys`). Serve all'utente per ve
 - `get_codesys_status()` → state (`stopped` | `launching` | `ready` | `stalled` | `error`), mode, pid, **heartbeat age** (patch 2026-05-26). State `stalled` = watcher non risponde da >30s (worker dead o primary thread deadlocked) → chiama `force_reset_watcher`.
 - `force_reset_watcher()` → recovery quando MCP "locked": kill processo AB + cleanup IPC + relaunch in un solo step (~10-30s vs ~30-60s di shutdown+launch manuale). **NON salva il progetto** (stato unknown se watcher locked → rischio corruzione).
 - `diagnose_mcp_state()` → diagnostic read-only: state, heartbeat age, command queue depth, orphan result count, watcher_error.txt contents + interpretation testuale. Usa PRIMA di `force_reset_watcher` per verificare che il reset serva (non sia un long-running operation in corso).
+- `get_mcp_version()` → JSON con mcpVersion (package.json), buildSha (git rev-parse HEAD), e la lista delle patches applicate nel fork. Usa per verificare quali fix sono attivi prima di assumere che serva un workaround per un bug già fissato.
 - `attach_codesys(confirm?)` → **NON utilizzabile su Standard**. Premium-only.
 
 ### Project
-- `open_project(filePath)` → apre `.project` esistente.
+- `open_project(filePath)` → apre `.project` esistente. **Patch 2026-05-26**: lock-aware retry — se trova `.lock` orfano con PID morto, lo rimuove e ritenta.
 - `close_project(projectFilePath, force?)` → chiude il progetto corrente. Salva prima a meno che `force=true`. **Critico per workflow library dev**: senza, switch lib↔example richiede `shutdown_codesys` + `launch_codesys` (~30-60s). Con `close_project` lo switch è <5s.
 - `create_project(filePath)` → da template Standard.project. ⚠️ Path template hardcoded può non funzionare su AB; preferire copia di un template manuale + `open_project`.
+- `create_ac500_project(newProjectPath, templateProjectPath, addLibraries?, overwrite?)` → bootstrap nuovo AC500 V3 progetto copiando un template esistente (es. NexoPlcExample vanilla). Preserva il device tree. `addLibraries` SEMICOLON-separated per evitare collision con virgole nei nomi lib.
 - `save_project(projectFilePath)` → salva.
 - `create_project_archive(projectFilePath, archivePath?, ...)` → archive `.projectarchive`.
-- `get_project_info(projectFilePath)` → legge i campi Project Information (version, title, author, company, description).
+- `clean_project(projectFilePath, alsoEvictPrecompileCache?)` → clean + delete `.precompilecache` / `.compileinfo` / `.bootinfo`. Usa quando il compile sembra stale.
+- `inspect_project_tree(projectFilePath, includeSymbols?)` → JSON dump strutturato: devices, libraries (con version), POUs, GVLs, DUTs, tasks, folders. Sostituisce 3 round-trip (get_all_pou_code + list_project_libraries + get_task_configuration).
+- `get_project_info(projectFilePath)` → JSON con campi Project Information (version, title, author, company, description). **Patch 2026-05-26**: ora ritorna JSON parseabile (prima solo text).
 - `set_project_info(projectFilePath, version?, title?, author?, company?, description?)` → aggiorna i campi Project Information. Sblocca version bump automatici in CI/CD (la `GetVersion()` POU auto-generata legge da qui).
 
 ### Read / Search
 - `get_all_pou_code(projectFilePath)` → bulk dump declaration+implementation di **tutti** POU/Method/Property/DUT/GVL. **Primo strumento di esplorazione**.
 - `search_code(projectFilePath, pattern, regex?, caseSensitive?, ...)` → regex/literal across tutti corpi testuali; ritorna `path:line:col`.
 - `find_references(projectFilePath, symbol, ...)` → riferimenti a un simbolo.
+- `get_pou_dependency_graph(projectFilePath, rootPOU?)` → directed graph di chiamate FB/Function/Method. Con `rootPOU='PLC_PRG'` annota `isDeadCode` per POUs non raggiungibili. Risolve "compile non vede typo in dead POUs" mystery.
+- `get_all_pou_code_offline(projectFilePath)` / `search_code_offline(projectFilePath, pattern, ...)` → variants pure-Node che bypassano AB. **Richiedono PLCopen XML export** (.project nativo è binary 0x23 89 ED 33); inutile per file binari. Usa per leggere/cercare CONCURRENT con AB UI aperto, partendo da un export XML statico.
 - Resource template: `codesys://project/{path}/structure` per albero gerarchico.
 - Resource template: `codesys://project/{path}/pou/{pou_path}/code` per leggere POU singola.
 
@@ -84,6 +90,16 @@ Una sola volta per sessione (o dopo `shutdown_codesys`). Serve all'utente per ve
 - `list_project_libraries(projectFilePath)` → riferimenti correnti.
 - `add_library(projectFilePath, libraryName, version?, ...)`.
 - `install_library_to_repository(libraryProjectFilePath, repositoryName?)` → installa il `.library` corrente nel CODESYS Library Repository (equivalente al menu UI "File → Save Project and Install into Library Repository"). Critico nel workflow library dev: senza, i consumer projects continuano a vedere la versione precedente. Versione+nome match → overwrite; altrimenti installazione side-by-side.
+- `list_library_repository(nameFilter?)` → enumera libraries installate nel Library Repository (System / User / Default repos). JSON con name, version, company, location.
+- `uninstall_library_from_repository(libraryName, version, repositoryName?)` → rimuove versione specifica. `version='*'` per rimuovere tutte.
+- `get_library_parameters(projectFilePath, libraryName?)` → JSON con Library Parameters (consumer-overridable VAR_GLOBAL CONSTANT) per ogni library reference: name, value, defaultValue, isOverridden, type, comment. **Risolve il classico "consumer vede valore stale" debugging**: se isOverridden=true con valore non più allineato al default, usa `reset_library_parameter`.
+- `set_library_parameter(projectFilePath, libraryName, parameterName, value)` → setta override consumer-side.
+- `reset_library_parameter(projectFilePath, libraryName, parameterName)` → rimuove override, ritorna a library default.
+- `export_library_parameters(projectFilePath, outputPath, libraryName?)` / `import_library_parameters(projectFilePath, inputPath, skipDefaults?)` → JSON round-trip per replicare config consumer.
+- `set_library_reference_version(projectFilePath, libraryName, version)` → pin/update versione library reference. Cascade through set_version() / version= / remove+add (last drops overrides).
+- `rebuild_library(libraryProjectFilePath, regenerateCompiledArtifacts?)` → full rebuild library: clean + check_all_pool_objects + tentativo regen compiled artifacts. Su Standard la regen artifacts spesso fallisce con ERR_API_NOT_EXPOSED (soft warning, source rebuild funziona).
+- `release_library_version(libraryProjectFilePath, version, distFolder?, gitTag?, ghRelease?)` → orchestratore release: set_project_info → rebuild → install → copy a distFolder → opzionale git tag + gh release.
+- `diff_library_versions(sourceLibraryPath, targetLibraryPath)` → diff strutturato tra 2 versioni library. **Richiede PLCopen XML export** (.library nativo è binary); usa AB > File > Export PLCopen XML... prima.
 
 ### Task Configuration (AC500)
 - `get_task_configuration(projectFilePath)` → lista Task Configuration node + child tasks con cycle time, priority, watchdog, stack size correnti.
