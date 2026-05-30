@@ -134,6 +134,7 @@ async function fileExists(filePath: string): Promise<boolean> {
  * roughly chronological. Each entry maps a short stable ID to a description.
  */
 const MCP_PATCHES: Array<{ id: string; description: string }> = [
+  { id: 'run-static-analysis', description: 'run_static_analysis tool (Premium): executes the "Run Static Analysis" ScriptCommand (guid AE97B6F4) and reads findings from message category "Additional code checks" (guid 220493A1). Reuses parseCompileMessages. Avoids SARIF export (modal dialog deadlocks the watcher). Confirmed scriptable 2026-05-30 on AB 2.9 SP19 Premium.' },
   { id: 'attach-mode-pid-guard', description: 'attach_codesys no longer flips healthy attached sessions to error: skip the PID-liveness health check when attached (pid is null by design in attach mode; liveness governed by watcher heartbeat). Confirmed 2026-05-30 on Premium that online ops still raise Stack empty from the GUI scripting context — edition-independent SP19 limit.' },
   { id: 'ready-timeout-ms-configurable', description: 'CLI --ready-timeout-ms flag wired to LauncherConfig (cold-start ~120s on AB)' },
   { id: 'command-timeout-wired', description: 'CLI --timeout wired to IpcClient.commandTimeoutMs (previously ignored)' },
