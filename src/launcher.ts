@@ -40,6 +40,16 @@ export class CodesysLauncher implements ScriptExecutor {
   private lastError: string | null = null;
   private healthInterval: ReturnType<typeof setInterval> | null = null;
   private stateChangeCallbacks: Array<(state: CodesysState) => void> = [];
+  /**
+   * True when we attached to a user-owned GUI (prepareAttach/completeAttach)
+   * instead of spawning the process ourselves. In attach mode `pid` is null
+   * by design, so the PID-based liveness check (isRunning()) must NOT be used
+   * to decide the process died -- liveness is governed purely by the watcher
+   * heartbeat. Without this guard the health monitor flips an otherwise
+   * healthy attach session to 'error' within one interval. Reset on every
+   * launch()/shutdown()/forceReset().
+   */
+  private attached = false;
 
   constructor(config: LauncherConfig) {
     this.config = config;
@@ -82,6 +92,7 @@ export class CodesysLauncher implements ScriptExecutor {
     }
 
     this.setState('launching');
+    this.attached = false; // we are spawning, not attaching
     this.sessionId = uuidv4();
     this.ipcDir = path.join(os.tmpdir(), SESSION_DIR_PREFIX, this.sessionId);
 
@@ -275,6 +286,7 @@ sys.exit(0)
     this.pid = null;
     this.process = null;
     this.ipcClient = null;
+    this.attached = false;
     this.setState('stopped');
     launcherLog.info('Shutdown complete');
   }
@@ -313,6 +325,7 @@ sys.exit(0)
     }
 
     this.setState('launching');
+    this.attached = true; // user owns the GUI; pid will stay null
     this.sessionId = uuidv4();
     this.ipcDir = path.join(os.tmpdir(), SESSION_DIR_PREFIX, this.sessionId);
     launcherLog.info(`Attach session ${this.sessionId} — IPC dir: ${this.ipcDir}`);
@@ -470,7 +483,12 @@ sys.exit(0)
   private startHealthMonitor(): void {
     this.healthInterval = setInterval(async () => {
       // Pre-existing check: did the CODESYS process die outright?
-      if ((this.state === 'ready' || this.state === 'stalled') && !this.isRunning()) {
+      // Skip in attach mode: pid is null by design (we did not spawn), so
+      // isRunning() would always report "dead" and falsely flip a healthy
+      // attached session to 'error'. In attach mode liveness is governed
+      // entirely by the heartbeat staleness check below -- if the user closes
+      // their GUI, heartbeat.signal stops updating and we flip to 'stalled'.
+      if (!this.attached && (this.state === 'ready' || this.state === 'stalled') && !this.isRunning()) {
         launcherLog.error('Health check: CODESYS process died');
         this.lastError = 'CODESYS process died unexpectedly';
         this.pid = null;
@@ -574,6 +592,7 @@ sys.exit(0)
     this.process = null;
     this.ipcClient = null;
     this.startedAt = null;
+    this.attached = false;
     this.setState('stopped');
     this.lastError = null;
 

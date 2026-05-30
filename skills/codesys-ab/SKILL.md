@@ -114,9 +114,9 @@ Una sola volta per sessione (o dopo `shutdown_codesys`). Serve all'utente per ve
 - `set_device_parameter(projectFilePath, devicePath, parameterName, value)`.
 - `map_io_channel(projectFilePath, channelPath, variableName, ...)`.
 
-### Online / runtime — ⚠️ INHERENT LIMIT su AB 2.9 Standard
+### Online / runtime — ⚠️ INHERENT LIMIT su AB 2.9 SP19 (Premium INCLUSO)
 
-**Confermato empiricamente 2026-05-27**: i tool online-side **NON funzionano su AB 2.9 Standard** dopo UI Login. Tutti gli accessor `online_application` (su target_app, primary_project, ancestor chain Plc Logic / PLC_AC500_V3, e su `script_engine.online`) ritornano `present=[]` via `hasattr`. La scripting API Standard genuinamente non espone il riuso della sessione online creata dall'UI. Tutti questi tool fallirebbero con `ERR_ONLINE_STACK_EMPTY`:
+**Confermato empiricamente 2026-05-27 (Standard) E 2026-05-30 (Premium, attach mode)**: i tool online-side **NON funzionano via scripting su AB 2.9 SP19, indipendentemente dall'edition**. La `OnlineManager` (`se.online`) espone **un solo metodo**: `create_online_application`, che fallisce con `RuntimeError: Stack empty.` perché lo stack di selezione dell'IDE non è popolato da un contesto script. **Nessun** accessor alternativo esiste: `target_app` ha solo `create_call/get_call/is_active_application/set_active_application` (niente `online_application`), il device node `PLC_AC500_V3` non ha attr online, `se.online` non ha metodi reuse/observe. Quindi riusare una sessione UI Login è impossibile. Tutti questi tool falliscono con `ERR_ONLINE_STACK_EMPTY`:
 
 - `connect_to_device(projectFilePath, devicePath, ipAddress?, gatewayName?)` — gateway resolver patch presente, ma il successivo create_online_application sbatte sullo Stack empty
 - `get_application_state`, `read_variable`, `write_variable`, `monitor_variables`
@@ -131,7 +131,9 @@ Una sola volta per sessione (o dopo `shutdown_codesys`). Serve all'utente per ve
 **Tool ancora utili anche su Standard**:
 - `set_credentials`, `set_simulation_mode` — settano valori nel progetto, non richiedono online session
 
-**Su AB Premium**: questi tool dovrebbero funzionare (Tools → Scripting → Execute Script File espone un IDE context che popola lo stack), ma non testati empiricamente nel fork.
+**Su AB Premium — CONFERMATO IDENTICO A STANDARD (2026-05-30)**: testato empiricamente in attach mode (watcher dentro il contesto scripting della GUI, dopo Online→Login in simulazione). Risultato: `create_online_application` → `Stack empty`, zero accessor `online_application` su qualsiasi host. **Tools → Scripting → Execute Script File NON popola lo stack online** — l'ipotesi precedente era sbagliata. La scripting API di CODESYS V3.5 SP19 non supporta online ops da script, punto. Premium NON cambia nulla qui. (Su CODESYS V4 / AB 3.x con scripting Python 3 nativo potrebbe cambiare — non verificato.)
+
+> **Nota attach mode (fix 2026-05-30)**: attach_codesys aveva un bug che uccideva la sessione attached entro ~5s (l'health monitor controllava un PID che in attach mode è `null` by design → falso "process died"). Corretto con un flag `attached` che salta il check PID-based (in attach mode la liveness è data solo dall'heartbeat). Attach mode ora è stabile e utile per pilotare i **tool offline** dentro una GUI che gestisci tu (zero lock conflict con altre istanze AB). Non sblocca però gli online ops — quelli restano impossibili come sopra.
 
 ## Pattern ricorrenti
 
