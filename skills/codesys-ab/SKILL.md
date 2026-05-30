@@ -135,17 +135,18 @@ Una sola volta per sessione (o dopo `shutdown_codesys`). Serve all'utente per ve
 
 > **Nota attach mode (fix 2026-05-30)**: attach_codesys aveva un bug che uccideva la sessione attached entro ~5s (l'health monitor controllava un PID che in attach mode è `null` by design → falso "process died"). Corretto con un flag `attached` che salta il check PID-based (in attach mode la liveness è data solo dall'heartbeat). Attach mode ora è stabile e utile per pilotare i **tool offline** dentro una GUI che gestisci tu (zero lock conflict con altre istanze AB). Non sblocca però gli online ops — quelli restano impossibili come sopra.
 
-### Static Analysis (Code Analysis) — ⚠️ TRIGGER sì, READ-BACK no (AB 2.9 SP19 Premium)
+### Static Analysis (Code Analysis) — ✅ SCRIPTABILE su AB 2.9 SP19 Premium
 
-**Confermato empiricamente 2026-05-30 su Premium** (Code Analysis è un add-on Premium-only). Si può **lanciare** la Static Analysis via scripting, ma **non leggerne i findings** programmaticamente:
+**Confermato empiricamente 2026-05-30 su Premium** (Code Analysis è un add-on Premium-only). La Static Analysis si può **sia lanciare sia leggere** via scripting — quindi un tool MCP è fattibile:
 
-- ✅ Il comando `Run Static Analysis` (`se.system.commands`, guid `ae97b6f4-dc9a-480e-aac8-6061e684f3c0`, tokens `('staticanalysis','run')`) è un `ScriptCommand` con `.execute()` → gira senza errori e produce findings reali (visibili nella GUI).
-- ❌ I findings **NON** finiscono nel message-bus dello scripting: `se.system.get_message_objects(guid)` con la categoria "Static analysis" (`217bc73e-759b-4a3c-bfa1-991c938a6541`) ritorna **0**. I findings vivono nella finestra GUI "Static Analysis", store separato.
-- ❌ Export SARIF inutilizzabile via scripting: il comando `Run Static Analysis and export to Sarif file` (tokens `('staticanalysis','check','--sarif')`) ha `execute()` con firma `Void execute()` — **nessun parametro path**. Eseguendolo non viene scritto alcun file `.sarif` (verificato con scan filesystem-wide). La versione menu prompta per il path via dialog; lo scripting non può fornirlo.
+- ✅ **Trigger**: il comando `Run Static Analysis` (`se.system.commands`, guid `ae97b6f4-dc9a-480e-aac8-6061e684f3c0`, tokens `('staticanalysis','run')`) è un `ScriptCommand`; `.execute()` gira senza errori.
+- ✅ **Read-back**: i messaggi finiscono nella categoria **"Additional code checks"** guid **`220493a1-f49b-4416-9a3f-a545db707cbe`**, leggibili con `se.system.get_message_objects(System.Guid('220493a1-...'))`. Confermato 2x (es. `"Static analysis complete -- 0 errors, 0 warnings"`). Stesso identico plumbing di `compile_project`.
+- ⚠️ **Caveat rule-set**: su un progetto senza rule set SA attivo (es. Test.project) il read-back ritorna solo la riga di summary, 0 violazioni — perché non ci sono regole abilitate, NON perché il canale non funzioni. Per findings reali serve un progetto con Static Analysis rules configurate (Project Settings, normalmente via GUID/preset). Il canale di lettura è comunque provato.
+- ❌ **SARIF export**: il comando `Run Static Analysis and export to Sarif file` (guid `aaaaaaaa-0e82-46ef-baec-b2deae722d28`) ha `execute(*stBatchArguments)` variadico, MA eseguirlo **apre un dialog Save-As modale sul primary thread → deadlocka il watcher** (heartbeat stallato, serve force_reset). NON headless-safe. Usa il read-back via categoria, non il SARIF.
 
-**Implicazione per un tool MCP**: un `run_static_analysis` potrebbe triggerare l'analisi ma non restituire i findings → valore limitato (non elimina il round-trip GUI). NON implementato per questo motivo. Angoli futuri non verificati: versioni CODESYS più recenti potrebbero esporre i findings o accettare un path SARIF; CLI `AutomationBuilder.exe` standalone con sottocomando staticanalysis.
+**Implicazione per un tool MCP**: un `run_static_analysis(projectFilePath)` è **viable** — esegue il comando e ritorna le righe di categoria `220493a1`, come fa `compile_project`. (Non ancora implementato come tool dedicato, ma il pattern è confermato.) Evitare invece il path SARIF finché non si trova un modo per sopprimere il dialog.
 
-> **Message API note (utile in generale)**: `se.system.get_message_objects(category)` vuole un `System.Guid`, non una stringa (`TypeError: expected Guid, got str`). Categorie note: Default `194b48a9-…`, Compile `d761e059-…`, Static analysis `217bc73e-…`. `clear_messages()` richiede 1 argomento (categoria).
+> **Message API note (utile in generale)**: `se.system.get_message_objects(category)` e `clear_messages(category)` vogliono un `System.Guid`, non una stringa. Categorie viste su un progetto AC500 V3: Script Messages `194b48a9`, Build `97f48d64`, Precompile `217bc73e`, Memory Usage `ee56da69`, AC500 V3 Configuration `d761e059`, Additional code checks (= Static Analysis) `220493a1`.
 
 ## Pattern ricorrenti
 
