@@ -134,6 +134,7 @@ async function fileExists(filePath: string): Promise<boolean> {
  * roughly chronological. Each entry maps a short stable ID to a description.
  */
 const MCP_PATCHES: Array<{ id: string; description: string }> = [
+  { id: 'create-boot-application', description: 'create_boot_application tool (Premium-confirmed): ScriptApplication.create_boot_application(path) after generate_code() -> deployable .app + .crc artifact, offline (no PLC). Verified 2026-05-31 on AB 2.9 SP19 (215KB .app + .crc). NOTE: SA config store/load + Standard Metrics export remain UI-only — their commands open modal Save-As dialogs that deadlock the headless watcher.' },
   { id: 'run-static-analysis', description: 'run_static_analysis tool (Premium): executes the "Run Static Analysis" ScriptCommand (guid AE97B6F4) and reads findings from message category "Additional code checks" (guid 220493A1). Reuses parseCompileMessages. Avoids SARIF export (modal dialog deadlocks the watcher). Confirmed scriptable 2026-05-30 on AB 2.9 SP19 Premium.' },
   { id: 'attach-mode-pid-guard', description: 'attach_codesys no longer flips healthy attached sessions to error: skip the PID-liveness health check when attached (pid is null by design in attach mode; liveness governed by watcher heartbeat). Confirmed 2026-05-30 on Premium that online ops still raise Stack empty from the GUI scripting context — edition-independent SP19 limit.' },
   { id: 'ready-timeout-ms-configurable', description: 'CLI --ready-timeout-ms flag wired to LauncherConfig (cold-start ~120s on AB)' },
@@ -1258,6 +1259,31 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       );
       const result = await executor.executeScript(script, 180_000); // big projects can take a while
       return formatStructuredResponse(result, `PLCopen XML exported to ${args.outputXmlPath}.`);
+    }
+  );
+
+  s.tool(
+    'create_boot_application',
+    "Generate a deployable boot application (.app + .crc) from the project's active application via ScriptApplication.create_boot_application(). Equivalent to AB UI 'Online > Create Boot Application' but offline (no PLC connection needed). Runs generate_code() first so the image is current. Premium-confirmed. Returns the output path and byte size; the .crc sibling is written automatically next to the .app.",
+    {
+      projectFilePath: z.string().describe("Path to the .project file."),
+      outputAppPath: z.string().min(1).describe("Path where the .app file will be written (e.g. C:/out/MyApp.app). Parent directory is auto-created; a sibling .crc is written alongside."),
+      writeVisuFiles: z.boolean().describe("If true, also write visualization files (uses the 3-arg create_boot_application overload). Default false.").optional(),
+    },
+    async (args: { projectFilePath: string; outputAppPath: string; writeVisuFiles?: boolean }) => {
+      const escapedProj = resolvePath(args.projectFilePath, workspaceDir);
+      const escapedOut = resolvePath(args.outputAppPath, workspaceDir);
+      const script = scriptManager.prepareScriptWithHelpers(
+        'create_boot_application',
+        {
+          PROJECT_FILE_PATH: escapedProj,
+          OUTPUT_APP_PATH: escapedOut,
+          WRITE_VISU_FILES: args.writeVisuFiles === true ? 'true' : 'false',
+        },
+        ['_text_utils', 'ensure_project_open']
+      );
+      const result = await executor.executeScript(script, 180_000); // codegen + boot image can be slow
+      return formatStructuredResponse(result, `Boot application created at ${args.outputAppPath}.`);
     }
   );
 
