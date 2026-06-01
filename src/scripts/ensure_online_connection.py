@@ -151,13 +151,16 @@ def ensure_online_connection(primary_project):
             print("SCRIPT_ERROR_CODE: ERR_ONLINE_STACK_EMPTY")
         msg = (
             "create_online_application failed for '%s': %s. "
-            "For simulation, call set_simulation_mode(enable=True) first; "
-            "for a real PLC, ensure the gateway/address is set on the "
-            "device (or pass ipAddress/gatewayName to connect_to_device). "
-            "If simulation is engaged but this still raises 'Stack empty', "
-            "click Online -> Login once in the IDE for this session (the "
-            "MCP will then reuse your session via target_app.online_application "
-            "on subsequent calls)."
+            "CONFIRMED LIMITATION (AB 2.9 SP19, Standard AND Premium, verified "
+            "2026-05-30): online ops are NOT scriptable on this CODESYS version. "
+            "se.online exposes only create_online_application, which raises "
+            "'Stack empty' from any scripting context (--runscript OR attach "
+            "mode), and NO online_application accessor exists on target_app / "
+            "project / device / se.online. Clicking Online->Login in the IDE "
+            "does NOT make the session reusable from script -- that earlier hint "
+            "was wrong. There is no scripting workaround: drive online ops "
+            "(Login/Download/Watch/read/write) from the AB UI, or out-of-band "
+            "via the PLC's own protocol (MQTT/OPC UA/HTTP)."
         ) % (app_name, e)
         raise RuntimeError(msg)
 

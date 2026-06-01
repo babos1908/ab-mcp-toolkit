@@ -204,6 +204,21 @@ try:
                 "error": "Read error: %s" % read_err,
                 "timestamp": time.time(),
             }))
+            # CRITICAL: remove the offending command (and any script) before
+            # returning. Without this, a command whose scriptPath is missing
+            # (orphaned .command.json) is re-read on EVERY worker loop forever:
+            # sorted()[0] keeps returning it, starving all later commands and
+            # presenting as a "stuck/stalled" watcher. Empirically observed
+            # 2026-06-01. The normal cleanup at the end of process_command is
+            # skipped on this early return, so do it here too.
+            try:
+                if os.path.exists(command_path):
+                    os.remove(command_path)
+                _sp = os.path.join(COMMANDS_DIR, "%s.py" % request_id)
+                if os.path.exists(_sp):
+                    os.remove(_sp)
+            except Exception as _cl_err:
+                _log("Failed to clean up unreadable command %s: %s" % (request_id, _cl_err))
             return
 
         # Cross-thread communication
@@ -219,6 +234,32 @@ try:
             capture = OutputCapture()
             sys.stdout = capture
             sys.stderr = capture
+            # Anti-deadlock guard: force ScriptEngine to route any prompt/dialog
+            # to the (headless) script layer instead of opening a GUI modal on
+            # this primary/STA thread. Without this, an operation that would
+            # normally pop a confirmation dialog -- most importantly
+            # close_project / open_project while an interactive ONLINE session
+            # is logged in to a PLC ("Logout from device?"), but also Save-As
+            # style exports -- blocks the primary thread forever: the modal can
+            # never be answered headlessly, the worker's heartbeat goes stale,
+            # and the whole watcher appears dead (requires force_reset +
+            # ~2min cold start). Empirically 2026-06-01: with default
+            # ForwardSimplePrompts a modal-triggering command hangs >200s; with
+            # ProcessScriptPrompts the same command returns in <1s (it raises
+            # or no-ops instead of showing a window). We set it per-exec and
+            # restore afterwards so we never leave global state altered if a
+            # caller depended on the default. Best-effort: a runtime that lacks
+            # these members simply runs as before.
+            _prev_prompt_handling = None
+            _ph_set = False
+            try:
+                import scriptengine as _se_guard
+                if hasattr(_se_guard.system, 'prompt_handling') and hasattr(_se_guard, 'PromptHandling'):
+                    _prev_prompt_handling = _se_guard.system.prompt_handling
+                    _se_guard.system.prompt_handling = _se_guard.PromptHandling.ProcessScriptPrompts
+                    _ph_set = True
+            except Exception:
+                pass
             try:
                 exec_globals = {
                     '__builtins__': __builtins__,
@@ -261,6 +302,14 @@ try:
             finally:
                 sys.stdout = old_stdout
                 sys.stderr = old_stderr
+                # Restore the previous prompt-handling mode so we never leak
+                # altered global ScriptEngine state to a later command.
+                if _ph_set:
+                    try:
+                        import scriptengine as _se_restore
+                        _se_restore.system.prompt_handling = _prev_prompt_handling
+                    except Exception:
+                        pass
 
             shared_result[0] = {
                 "requestId": request_id,
