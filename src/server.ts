@@ -134,6 +134,8 @@ async function fileExists(filePath: string): Promise<boolean> {
  * roughly chronological. Each entry maps a short stable ID to a description.
  */
 const MCP_PATCHES: Array<{ id: string; description: string }> = [
+  { id: 'keep-alive-decouple-ab-lifetime', description: 'AB lifetime decoupled from MCP server process. With --keep-alive, signal-driven shutdown (SIGTERM/SIGINT from client recycle / compact / reconnect) now detachKeepAlive() instead of taskkill -- the detached AB survives. On next startup adoptExisting() re-binds to the still-running watcher (newest session with fresh heartbeat + PID-alive from ready.signal), skipping the ~2min cold start and avoiding a second AB. Explicit shutdown_codesys + force_reset_watcher still terminate AB. Fixes the recurring "AB closed itself again" on routine session events.' },
+  { id: 'soft-probe-before-forcereset', description: 'ResilientExecutor soft-probes the watcher heartbeat before hard-resetting on 2 consecutive timeouts. A fresh heartbeat = "busy, not dead" (classic case: an interactive ONLINE session on a real PLC monopolizes AB primary thread so MCP commands time out) -> re-throw the timeout instead of killing AB under the user. Only a STALE heartbeat triggers the kill+coldstart path.' },
   { id: 'watcher-prompt-handling-guard', description: 'watcher sets se.system.prompt_handling=ProcessScriptPrompts per command exec (restored after) so a modal dialog cannot deadlock the primary thread. Fixes the #1 field blocker: close_project/open_project while an interactive ONLINE session is logged in to a PLC would pop a "Logout from device?" modal that the headless host could never answer -> heartbeat stale -> force_reset + 2min cold start. Proxy-verified 2026-06-01: SARIF-export modal went from >200s deadlock to <1s return. Also fixes orphan-command queue starvation: a .command.json whose scriptPath is missing is now removed instead of re-read every worker loop forever.' },
   { id: 'online-ops-error-message-corrected', description: 'ensure_online_connection ERR_ONLINE_STACK_EMPTY message no longer tells the user to "click Online->Login, the MCP will reuse your session" -- that reuse path does NOT exist on AB 2.9 SP19 (Standard or Premium); the message now states the confirmed limitation and points to AB UI / out-of-band protocols.' },
   { id: 'create-boot-application', description: 'create_boot_application tool (Premium-confirmed): ScriptApplication.create_boot_application(path) after generate_code() -> deployable .app + .crc artifact, offline (no PLC). Verified 2026-05-31 on AB 2.9 SP19 (215KB .app + .crc). NOTE: SA config store/load + Standard Metrics export remain UI-only — their commands open modal Save-As dialogs that deadlock the headless watcher.' },
@@ -308,7 +310,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   s.tool(
     'launch_codesys',
-    'Manually launch CODESYS with UI. Use when --no-auto-launch was set.',
+    'Manually launch CODESYS with UI. Use when --no-auto-launch was set. If a still-running AB from a previous keep-alive session is detected, this adopts it (no cold start) instead of spawning a second instance.',
     async () => {
       if (!launcher) {
         return {
@@ -317,13 +319,29 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         };
       }
       try {
-        await launcher.launch();
+        // Prefer adopting a still-running AB (left alive by --keep-alive across
+        // a server recycle) over a fresh ~2min cold start. This is the path the
+        // typical "--no-auto-launch + manual launch_codesys" setup hits after a
+        // client reconnect, so adoption must live HERE too, not only in the
+        // background auto-launch block.
+        let adopted = false;
+        try {
+          adopted = await launcher.adoptExisting();
+        } catch (adoptErr) {
+          const m = adoptErr instanceof Error ? adoptErr.message : String(adoptErr);
+          serverLog.warn(`launch_codesys: adoptExisting() raised (ignored, will cold-launch): ${m}`);
+        }
+        if (!adopted) {
+          await launcher.launch();
+        }
         // Swap in the RESILIENT wrapper, not the raw launcher, so command
         // timeouts trigger auto-recovery via forceReset().
         executor.swapNow(resilientLauncher!);
         executionMode = 'persistent';
         return {
-          content: [{ type: 'text' as const, text: 'CODESYS launched successfully in persistent mode.' }],
+          content: [{ type: 'text' as const, text: adopted
+            ? 'Adopted the already-running CODESYS instance (no cold start). Persistent mode active.'
+            : 'CODESYS launched successfully in persistent mode.' }],
           isError: false,
         };
       } catch (err) {
@@ -3057,7 +3075,24 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
     // Hand the proxy a readiness promise so tool calls during the launch
     // window block on it before delegating - no race between swap and
     // mid-flight executeScript calls.
-    const launchReady = persistentLauncher.launch().then(
+    // Try to ADOPT a still-running AB from a previous keep-alive server before
+    // cold-launching. If --keep-alive left an AB alive across this server
+    // recycle, adoptExisting() re-binds to its live watcher (no ~2min cold
+    // start, no second AB). Only fall through to launch() when no live,
+    // PID-alive, fresh-heartbeat session is found.
+    const launchOrAdopt = (async () => {
+      try {
+        if (await persistentLauncher.adoptExisting()) {
+          serverLog.info('Adopted an existing live AB watcher; skipped cold launch.');
+          return;
+        }
+      } catch (adoptErr) {
+        const m = adoptErr instanceof Error ? adoptErr.message : String(adoptErr);
+        serverLog.warn(`adoptExisting() raised (ignored, will cold-launch): ${m}`);
+      }
+      return persistentLauncher.launch();
+    })();
+    const launchReady = launchOrAdopt.then(
       () => {
         executionMode = 'persistent';
         serverLog.info('CODESYS persistent instance ready; executor switched.');
@@ -3087,7 +3122,20 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
     serverLog.info('Shutdown signal received');
     if (launcher) {
       try {
-        await launcher.shutdown();
+        if (config.keepAlive) {
+          // Decouple AB's lifetime from the MCP server process. The client
+          // (Claude Code) recycles this server on routine events -- reconnect,
+          // /compact, config reload, client restart -- each delivering SIGTERM.
+          // Without keepAlive the handler would taskkill AB (it was spawned
+          // detached precisely so it wouldn't have to), forcing a ~2min cold
+          // start every time. With keepAlive we detach cleanly: AB keeps
+          // running, its watcher keeps heart-beating, and the NEXT server
+          // instance adopts it on startup (see adoptExisting). The explicit
+          // shutdown_codesys tool and force_reset_watcher still terminate AB.
+          await launcher.detachKeepAlive();
+        } else {
+          await launcher.shutdown();
+        }
       } catch {
         serverLog.warn('Launcher shutdown failed during signal handler');
       }

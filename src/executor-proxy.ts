@@ -26,6 +26,18 @@ import { launcherLog } from './logger';
  */
 export interface ResettableExecutor extends ScriptExecutor {
   forceReset(): Promise<void>;
+  /**
+   * Optional: report whether the watcher heartbeat is currently fresh. Used by
+   * ResilientExecutor to AVOID a hard forceReset (= kill + cold start) when a
+   * command timed out but the watcher is demonstrably alive -- the classic case
+   * being an interactive ONLINE session on a real PLC monopolizing AB's primary
+   * thread, so a marshalled command can't run in time even though nothing is
+   * actually broken. A fresh heartbeat means "busy, not dead": re-throw the
+   * timeout instead of killing AB under the user. Returns null if liveness is
+   * unknown (no heartbeat file yet), in which case the caller keeps the old
+   * kill-on-2nd-timeout behaviour.
+   */
+  isHeartbeatHealthy?(): Promise<boolean | null>;
 }
 
 /**
@@ -97,7 +109,39 @@ export class ResilientExecutor implements ResettableExecutor {
         throw err;
       }
 
-      // Two timeouts in a row -- assume watcher is locked. Reset and retry once.
+      // Two timeouts in a row -- the OLD behaviour was "assume watcher locked,
+      // kill + cold-start". But a very common false positive is an interactive
+      // ONLINE session on a real PLC: it monopolizes AB's primary/STA thread, so
+      // marshalled MCP commands can't run in time and time out, even though the
+      // watcher is perfectly alive and still refreshing its heartbeat. Killing
+      // AB there destroys the user's live debug session for nothing. So before
+      // any hard reset, soft-probe the heartbeat: if it's fresh, the watcher is
+      // "busy, not dead" -- re-throw the timeout and let the user/agent decide,
+      // do NOT kill.
+      if (typeof this.inner.isHeartbeatHealthy === 'function') {
+        try {
+          const healthy = await this.inner.isHeartbeatHealthy();
+          if (healthy === true) {
+            launcherLog.warn(
+              `ResilientExecutor: 2 consecutive timeouts BUT watcher heartbeat is fresh ` +
+              `(busy, not dead -- e.g. an interactive online session is holding the primary ` +
+              `thread). Skipping forceReset; re-throwing the timeout instead of killing AB.`
+            );
+            // Do not reset the counter to 0: if it's genuinely wedged, the next
+            // timeout with a now-STALE heartbeat will fall through to the kill
+            // path below. But decrement so we re-probe rather than kill blindly.
+            this.consecutiveTimeouts = 1;
+            throw err;
+          }
+        } catch (probeErr) {
+          // Probe itself failed -- fall through to the kill path (can't prove
+          // it's alive). Only swallow if the probe threw our own re-throw.
+          if (probeErr === err) throw err;
+          launcherLog.debug(`heartbeat soft-probe failed (ignored): ${probeErr}`);
+        }
+      }
+
+      // Watcher is locked (no heartbeat / stale). Reset and retry once.
       // Guard against concurrent resets if multiple in-flight calls all time out.
       if (!this.resetInFlight) {
         launcherLog.warn(
@@ -126,6 +170,14 @@ export class ResilientExecutor implements ResettableExecutor {
       launcherLog.info(`ResilientExecutor: retrying command after successful reset.`);
       return this.inner.executeScript(content, timeoutMs);
     }
+  }
+
+  /** Forward the heartbeat soft-probe to the inner executor (the real launcher). */
+  async isHeartbeatHealthy(): Promise<boolean | null> {
+    if (typeof this.inner.isHeartbeatHealthy === 'function') {
+      return this.inner.isHeartbeatHealthy();
+    }
+    return null;
   }
 
   /** Pass-through reset for callers that have a ResettableExecutor reference. */

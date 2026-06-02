@@ -11,7 +11,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { LauncherConfig, LauncherStatus, CodesysState, IpcResult, ScriptExecutor } from './types';
 import { IpcClient, DEFAULT_IPC_CONFIG } from './ipc';
 import { ScriptManager } from './script-manager';
-import { sweepStaleLocks } from './lock-file';
+import { sweepStaleLocks, isPidAlive } from './lock-file';
 import { launcherLog } from './logger';
 
 const SESSION_DIR_PREFIX = 'codesys-mcp-persistent';
@@ -19,6 +19,14 @@ const DEFAULT_READY_TIMEOUT_MS = 60_000;
 const READY_POLL_MS = 500;
 const SHUTDOWN_WAIT_MS = 5_000;
 const HEALTH_CHECK_INTERVAL_MS = 5_000;
+/**
+ * Max heartbeat age (seconds) for an existing watcher session to be considered
+ * adoptable on startup. A session whose heartbeat is fresher than this is a
+ * live AB instance left running by a previous (keep-alive) server; we re-attach
+ * to it instead of cold-launching a second AB. Kept below the 30s stall
+ * threshold so we never adopt a watcher that's already on its way to 'stalled'.
+ */
+const ADOPT_MAX_HEARTBEAT_AGE_S = 20;
 /**
  * Heartbeat age (seconds) above which the launcher transitions to 'stalled'.
  * The watcher writes heartbeat.signal every ~5s when the worker thread is
@@ -53,6 +61,104 @@ export class CodesysLauncher implements ScriptExecutor {
 
   constructor(config: LauncherConfig) {
     this.config = config;
+  }
+
+  /**
+   * Try to ADOPT a still-running watcher from a previous server instance
+   * instead of cold-launching a new AB. Returns true if an adoptable session
+   * was found and this launcher is now 'ready' and bound to it; false if no
+   * live session exists (caller should fall through to launch()).
+   *
+   * Why this exists: AB is spawned detached + unref'd, so with --keep-alive
+   * it survives the node process exiting (client recycle / reconnect /
+   * compact). On the next server start we want to RESUME control of that live
+   * AB -- skipping the ~2min cold start AND avoiding a second AB instance --
+   * by re-binding our IpcClient to its existing IPC dir.
+   *
+   * Adoptable = a session dir under %TEMP%/codesys-mcp-persistent/<guid>/ whose
+   * heartbeat.signal is fresher than ADOPT_MAX_HEARTBEAT_AGE_S AND whose
+   * ready.signal records a PID that is still alive. We pick the newest such
+   * session. The AB PID is recovered from ready.signal so health monitoring
+   * (process-died detection) keeps working after adoption.
+   */
+  async adoptExisting(): Promise<boolean> {
+    if (this.state === 'ready' || this.state === 'launching') return false;
+    const baseDir = path.join(os.tmpdir(), SESSION_DIR_PREFIX);
+    let entries: string[] = [];
+    try {
+      entries = fs.readdirSync(baseDir);
+    } catch {
+      return false; // no sessions ever created
+    }
+
+    type Candidate = { dir: string; ageMs: number; pid: number | null };
+    const candidates: Candidate[] = [];
+    const nowMs = Date.now();
+    for (const guid of entries) {
+      const sessionDir = path.join(baseDir, guid);
+      const hbPath = path.join(sessionDir, 'heartbeat.signal');
+      const readyPath = path.join(sessionDir, 'ready.signal');
+      try {
+        const stat = fs.statSync(hbPath);
+        const ageMs = nowMs - stat.mtimeMs;
+        if (ageMs > ADOPT_MAX_HEARTBEAT_AGE_S * 1000) continue; // stale/dead
+        // Recover the AB PID from ready.signal so health monitoring works.
+        let pid: number | null = null;
+        try {
+          const info = JSON.parse(fs.readFileSync(readyPath, 'utf-8'));
+          if (typeof info.pid === 'number') pid = info.pid;
+        } catch { /* ready.signal missing/garbled -- adopt without pid */ }
+        // If we DID recover a pid, require it to be alive; a fresh heartbeat
+        // with a dead pid would be a race we don't want to adopt into.
+        if (pid !== null && isPidAlive(pid) === false) continue;
+        candidates.push({ dir: sessionDir, ageMs, pid });
+      } catch {
+        continue; // no heartbeat.signal in this dir
+      }
+    }
+    if (candidates.length === 0) return false;
+
+    // Newest heartbeat wins.
+    candidates.sort((a, b) => a.ageMs - b.ageMs);
+    const chosen = candidates[0];
+    launcherLog.info(
+      `adoptExisting(): found live watcher at ${chosen.dir} ` +
+      `(heartbeat ${(chosen.ageMs / 1000).toFixed(1)}s old, pid=${chosen.pid ?? 'unknown'}); re-attaching.`
+    );
+
+    this.setState('launching');
+    this.sessionId = path.basename(chosen.dir);
+    this.ipcDir = chosen.dir;
+    this.pid = chosen.pid;
+    // NOT attach-mode: we recovered a real PID, so the PID-liveness health
+    // check is valid and useful (detects the AB actually dying). attach-mode
+    // is only for user-owned GUIs where pid is null by design.
+    this.attached = false;
+    this.ipcClient = new IpcClient({
+      baseDir: this.ipcDir,
+      ...DEFAULT_IPC_CONFIG,
+      ...(this.config.commandTimeoutMs ? { commandTimeoutMs: this.config.commandTimeoutMs } : {}),
+    });
+    await this.ipcClient.ensureDirectories();
+
+    // Confirm the watcher is actually answering (ready.signal present), not
+    // just leaving a warm heartbeat file behind.
+    if (!(await this.ipcClient.isReady())) {
+      launcherLog.warn('adoptExisting(): chosen session has no ready.signal; abandoning adoption.');
+      this.ipcClient = null;
+      this.pid = null;
+      this.ipcDir = null;
+      this.sessionId = null;
+      this.setState('stopped');
+      return false;
+    }
+
+    this.startedAt = Date.now();
+    this.lastError = null;
+    this.setState('ready');
+    this.startHealthMonitor();
+    launcherLog.info(`adoptExisting(): adopted session ${this.sessionId}; resumed without cold start.`);
+    return true;
   }
 
   /** Launch CODESYS with UI and watcher script */
@@ -291,6 +397,31 @@ sys.exit(0)
     launcherLog.info('Shutdown complete');
   }
 
+  /**
+   * Detach WITHOUT terminating AB. Used by the signal-driven shutdown path
+   * (SIGTERM/SIGINT from a client recycle) when --keep-alive is set: the node
+   * process is going away, but AB was spawned detached specifically so it can
+   * outlive us. We stop our health monitor and drop our handles, but we do NOT
+   * send the quit script, do NOT sendTerminate (that would stop the watcher),
+   * and do NOT taskkill. The watcher keeps running inside AB, its heartbeat
+   * keeps refreshing, and the NEXT server instance adopts it via
+   * adoptExisting(). The IPC dir is deliberately left on disk for that adoption.
+   */
+  async detachKeepAlive(): Promise<void> {
+    launcherLog.info(
+      `detachKeepAlive(): leaving AB (pid=${this.pid ?? 'unknown'}) running for the next server to adopt. ` +
+      `IPC dir preserved: ${this.ipcDir}`
+    );
+    this.stopHealthMonitor();
+    // Drop in-memory handles only. Do NOT cleanup() the IPC dir -- the live
+    // watcher still owns it and the next server needs it to adopt.
+    this.ipcClient = null;
+    this.process = null;
+    // Keep this.pid? No -- this launcher instance is being torn down with the
+    // process. State is irrelevant after process.exit(). Set stopped for tidiness.
+    this.setState('stopped');
+  }
+
   /** Execute a script through the IPC channel */
   async executeScript(content: string, timeoutMs?: number): Promise<IpcResult> {
     if (!this.ipcClient) {
@@ -451,6 +582,25 @@ sys.exit(0)
     }
 
     return { status, queueDepth, watcherErrorLog, isProcessAlive, interpretation };
+  }
+
+  /**
+   * Soft liveness probe used by ResilientExecutor before it decides to hard-
+   * reset on consecutive timeouts. Returns true if the watcher heartbeat is
+   * fresh (busy-not-dead), false if it is stale (genuinely wedged), null if we
+   * can't tell (no heartbeat file / no ipc client). A fresh heartbeat during a
+   * timeout typically means an interactive online session is monopolizing the
+   * primary thread -- we must NOT kill AB in that case.
+   */
+  async isHeartbeatHealthy(): Promise<boolean | null> {
+    if (!this.ipcClient) return null;
+    try {
+      const ageS = await this.ipcClient.getHeartbeatAgeSeconds();
+      if (ageS === null) return null;
+      return ageS <= HEARTBEAT_STALL_THRESHOLD_S;
+    } catch {
+      return null;
+    }
   }
 
   /** Check if the CODESYS process is still alive */
