@@ -134,6 +134,9 @@ async function fileExists(filePath: string): Promise<boolean> {
  * roughly chronological. Each entry maps a short stable ID to a description.
  */
 const MCP_PATCHES: Array<{ id: string; description: string }> = [
+  { id: 'path-resolution-uniform', description: 'find_object_by_path_robust gains a leaf-name recursive fallback: when strict folder-by-folder traversal fails (e.g. a library POU at "MyLib/Function Blocks/FB_X" whose folders are not direct children of the root), it retries an unambiguous recursive find of the last segment from project + Application roots. Makes full-from-root, folder/leaf, and bare-leaf path forms resolve uniformly across ALL tools. delete_object no longer blanket-refuses bare names -- only exact system paths + known system leaves. Tool descriptions document the accepted path forms. NEXO feedback 2026-06-06 #1.' },
+  { id: 'project-info-version-decode-fix', description: 'get_project_info no longer returns "ERR: Version object has no attribute decode": _to_unicode() coerces non-str objects (e.g. the .NET Version proxy) via unicode() instead of calling .decode() on them. NEXO feedback 2026-06-06 #2.' },
+  { id: 'create-method-name-alias', description: 'create_method accepts `name` as an alias of `methodName` (matches create_pou), so the param-name inconsistency no longer causes a first-call InputValidationError. NEXO feedback 2026-06-06 #3.' },
   { id: 'keep-alive-decouple-ab-lifetime', description: 'AB lifetime decoupled from MCP server process. With --keep-alive, signal-driven shutdown (SIGTERM/SIGINT from client recycle / compact / reconnect) now detachKeepAlive() instead of taskkill -- the detached AB survives. On next startup adoptExisting() re-binds to the still-running watcher (newest session with fresh heartbeat + PID-alive from ready.signal), skipping the ~2min cold start and avoiding a second AB. Explicit shutdown_codesys + force_reset_watcher still terminate AB. Fixes the recurring "AB closed itself again" on routine session events.' },
   { id: 'soft-probe-before-forcereset', description: 'ResilientExecutor soft-probes the watcher heartbeat before hard-resetting on 2 consecutive timeouts. A fresh heartbeat = "busy, not dead" (classic case: an interactive ONLINE session on a real PLC monopolizes AB primary thread so MCP commands time out) -> re-throw the timeout instead of killing AB under the user. Only a STALE heartbeat triggers the kill+coldstart path.' },
   { id: 'watcher-prompt-handling-guard', description: 'watcher sets se.system.prompt_handling=ProcessScriptPrompts per command exec (restored after) so a modal dialog cannot deadlock the primary thread. Fixes the #1 field blocker: close_project/open_project while an interactive ONLINE session is logged in to a PLC would pop a "Logout from device?" modal that the headless host could never answer -> heartbeat stale -> force_reset + 2min cold start. Proxy-verified 2026-06-01: SARIF-export modal went from >200s deadlock to <1s return. Also fixes orphan-command queue starvation: a .command.json whose scriptPath is missing is now removed instead of re-read every worker loop forever.' },
@@ -779,7 +782,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
     'Sets the declaration and/or implementation code for a specific POU, Method, or Property. Omit (or pass empty string for) a section to leave it unchanged.',
     {
       projectFilePath: z.string().describe("Path to the project file."),
-      pouPath: z.string().min(1).describe("Full relative path to the target object (e.g., 'Application/MyPOU')."),
+      pouPath: z.string().min(1).describe("Path to the target POU/Method/Property. Accepted forms (any of): full-from-root 'Application/MyPOU' or library 'MyLib/Function Blocks/FB_X[/Method]'; an unambiguous bare leaf name 'FB_X' or even a nested method 'VerifyInput' (resolved by recursive search). Ambiguous bare names error cleanly."),
       declarationCode: z.string().optional().describe("Code for the declaration part (VAR...END_VAR). If omitted or empty, not changed."),
       implementationCode: z.string().optional().describe("Code for the implementation logic. If omitted or empty, not changed."),
     },
@@ -856,10 +859,21 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
     {
       projectFilePath: z.string().describe("Path to the project file."),
       parentPouPath: z.string().describe("Relative path to the parent Function Block POU (e.g., 'Application/MyFB')."),
-      methodName: z.string().describe("Name of the new method (must be a valid IEC identifier)."),
+      // Accept BOTH `name` (matches create_pou) and `methodName` (legacy) so a
+      // first call doesn't fail with InputValidationError over the param-name
+      // inconsistency (NEXO feedback 2026-06-06). At least one must be present.
+      methodName: z.string().optional().describe("Name of the new method (must be a valid IEC identifier). Alias of `name`."),
+      name: z.string().optional().describe("Name of the new method (alias of `methodName`, matches create_pou's param)."),
       returnType: z.string().optional().describe("Return type (e.g., 'BOOL', 'INT'). Leave empty or omit for no return value."),
     },
-    async (args: { projectFilePath: string; parentPouPath: string; methodName: string; returnType?: string }) => {
+    async (args: { projectFilePath: string; parentPouPath: string; methodName?: string; name?: string; returnType?: string }) => {
+      const methodName = (args.methodName ?? args.name ?? '').trim();
+      if (!methodName) {
+        return {
+          content: [{ type: 'text' as const, text: 'Error: provide the method name via `name` (or `methodName`).' }],
+          isError: true,
+        };
+      }
       const escProjPath = resolvePath(args.projectFilePath, workspaceDir);
       const sanParentPath = sanitizePouPath(args.parentPouPath);
       const script = scriptManager.prepareScriptWithHelpers(
@@ -867,7 +881,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         {
           PROJECT_FILE_PATH: escProjPath,
           PARENT_POU_FULL_PATH: sanParentPath,
-          METHOD_NAME: args.methodName.trim(),
+          METHOD_NAME: methodName,
           RETURN_TYPE: (args.returnType ?? '').trim(),
         },
         ['_text_utils', 'ensure_project_open', 'find_object_by_path']
@@ -875,7 +889,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       const result = await executor.executeScript(script);
       return formatToolResponse(
         result,
-        `Method '${args.methodName}' created under '${sanParentPath}' in ${args.projectFilePath}. Project saved.`
+        `Method '${methodName}' created under '${sanParentPath}' in ${args.projectFilePath}. Project saved.`
       );
     }
   );
@@ -1656,7 +1670,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
     'Deletes a project object (POU, DUT, GVL, folder, etc.) from the CODESYS project. WARNING: This is destructive and cannot be undone. System nodes (Application, Device, Plc Logic, Library Manager, Project Settings, Task Configuration, etc.) are refused.',
     {
       projectFilePath: z.string().describe("Path to the project file."),
-      objectPath: z.string().describe("Full relative path to the object to delete (e.g., 'Application/MyPOU')."),
+      objectPath: z.string().describe("Path to the object to delete. Accepted forms (any of): full-from-root 'Application/MyPOU' or library 'MyLib/Function Blocks/FB_X[/Method]'; an unambiguous bare leaf name 'FB_X'. System/top-level nodes (Application, Device, Library Manager, Task Configuration, etc.) are refused."),
     },
     async (args: { projectFilePath: string; objectPath: string }) => {
       const escProjPath = resolvePath(args.projectFilePath, workspaceDir);
@@ -1683,11 +1697,26 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         'Device/Communication/Ethernet',
         'Device/SoftMotion General Axis Pool',
       ]);
-      if (sanObjPath === '' || !sanObjPath.includes('/') || SYSTEM_PATHS.has(sanObjPath)) {
+      // Known system node LEAF names. On a LIBRARY project a user POU lives at
+      // the root (e.g. bare 'FB_X' or 'NexoMqttLib/Function Blocks/FB_X'), so a
+      // blanket "must contain /" rule wrongly refused legitimate bare library
+      // POUs (NEXO feedback 2026-06-06). Instead: refuse exact system paths AND
+      // bare names that are known system leaves; allow other bare names through
+      // -- the Python layer's resolver + (system-node refusal) handles the rest.
+      const SYSTEM_LEAVES = new Set([
+        'Application', 'Device', 'Plc Logic', 'Project Settings',
+        'Library Manager', 'Task Configuration', '__VisualizationStyle',
+      ]);
+      const isBare = !sanObjPath.includes('/');
+      const refused =
+        sanObjPath === '' ||
+        SYSTEM_PATHS.has(sanObjPath) ||
+        (isBare && SYSTEM_LEAVES.has(sanObjPath));
+      if (refused) {
         return {
           content: [{
             type: 'text' as const,
-            text: `Refused: '${sanObjPath || '(empty)'}' is a system node or top-level object. delete_object only operates on user objects nested under a parent (e.g. 'Application/MyPOU').`,
+            text: `Refused: '${sanObjPath || '(empty)'}' is a system node or top-level object. delete_object only operates on user objects (e.g. 'Application/MyPOU', a full library path like 'MyLib/Function Blocks/FB_X', or an unambiguous bare leaf name).`,
           }],
           isError: true,
         };

@@ -15,6 +15,18 @@ def _to_unicode(s):
         return u""
     if isinstance(s, unicode):
         return s
+    # Non-string objects (e.g. a .NET Version proxy from project_info.version)
+    # have no .decode(). Coerce them to unicode via their string repr instead
+    # of crashing with "'Version' object has no attribute 'decode'". Only raw
+    # byte strings (Python 2 str) take the decode path below.
+    if not isinstance(s, str):
+        try:
+            return unicode(s)
+        except Exception:
+            try:
+                return str(s).decode('utf-8', 'replace')
+            except Exception:
+                return u"?"
     try:
         return s.decode('utf-8')
     except UnicodeDecodeError:
