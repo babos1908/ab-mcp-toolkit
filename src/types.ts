@@ -192,6 +192,13 @@ export interface ServerConfig extends LauncherConfig {
    * owns cleanup of accumulated .backup-* files.
    */
   autoBackup: boolean;
+  /**
+   * Optional path to mirror server lifecycle logs to a file (in addition to
+   * stderr). Under Claude Code CLI a stdio server's stderr isn't persisted, so
+   * lifecycle markers (detachKeepAlive / Force-killing / soft-probe / teardown
+   * cause) are otherwise invisible after AB dies. CLI: --log-file <path>.
+   */
+  logFile?: string | null;
 }
 
 /** Script template parameters */

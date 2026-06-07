@@ -47,6 +47,7 @@ program
   .option('--kill-existing-codesys', 'Kill any running CODESYS.exe before launching (dev convenience; off by default)', false)
   .option('--timeout <ms>', 'Default command timeout in ms', '60000')
   .option('--ready-timeout-ms <ms>', 'Max time (ms) to wait for the watcher to signal ready after launching CODESYS. Bump for heavy distributions like ABB Automation Builder (~180000).', '60000')
+  .option('--log-file <path>', 'Mirror server lifecycle logs to a file (in addition to stderr). Useful under Claude Code CLI where stdio stderr is not persisted. Captures detachKeepAlive / Force-killing / soft-probe / teardown-cause markers for diagnosing AB-died-on-recycle.')
   .option('--verbose', 'Enable verbose logging')
   .option('--debug', 'Enable debug logging (more verbose)')
   .option('--detect', 'Detect installed CODESYS versions and exit')
@@ -106,6 +107,7 @@ if (opts.detect) {
     fallbackHeadless: opts.fallbackHeadless !== false,
     verbose: opts.verbose || false,
     debug: opts.debug || false,
+    logFile: opts.logFile || null,
     mode: (opts.mode === 'headless' ? 'headless' : 'persistent') as ExecutionMode,
   };
 

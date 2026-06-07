@@ -17,7 +17,7 @@ import { BackupManager } from './backup-manager';
 import { diffLibraryFiles } from './library-diff';
 import { parseProjectOffline, searchProjectOffline } from './offline-reader';
 import { parseResultJson } from './result-parser';
-import { serverLog, setLogLevel } from './logger';
+import { serverLog, setLogLevel, setLogFile } from './logger';
 
 /** Resolve a file path to an absolute normalized path */
 function resolvePath(filePath: string, workspaceDir: string): string {
@@ -134,6 +134,7 @@ async function fileExists(filePath: string): Promise<boolean> {
  * roughly chronological. Each entry maps a short stable ID to a description.
  */
 const MCP_PATCHES: Array<{ id: string; description: string }> = [
+  { id: 'teardown-markers-and-logfile', description: 'Diagnose + harden AB-died-on-recycle. (1) --log-file <path> mirrors lifecycle logs to a file with SYNCHRONOUS appends (stderr is not persisted under Claude Code CLI), so detachKeepAlive / Force-killing / soft-probe / teardown-cause markers survive an abrupt teardown. (2) shutdown now funnels through one guarded handler that logs cause= and runs on stdin end/close + beforeExit, not just SIGINT/SIGTERM -- a Claude Code CLI stdio close during an IDLE gap delivers no signal, so previously detachKeepAlive() never ran and AB could be orphaned/killed with NO marker in any log. (3) If AB dies and NONE of these markers appear, that is the signature of an OS job-object hard-kill (uninterceptable) -> attach mode is the robust mitigation. NEXO 2026-06-07 #6 recurrence.' },
   { id: 'path-resolution-uniform', description: 'find_object_by_path_robust gains a leaf-name recursive fallback: when strict folder-by-folder traversal fails (e.g. a library POU at "MyLib/Function Blocks/FB_X" whose folders are not direct children of the root), it retries an unambiguous recursive find of the last segment from project + Application roots. Makes full-from-root, folder/leaf, and bare-leaf path forms resolve uniformly across ALL tools. delete_object no longer blanket-refuses bare names -- only exact system paths + known system leaves. Tool descriptions document the accepted path forms. NEXO feedback 2026-06-06 #1.' },
   { id: 'project-info-version-decode-fix', description: 'get_project_info no longer returns "ERR: Version object has no attribute decode": _to_unicode() coerces non-str objects (e.g. the .NET Version proxy) via unicode() instead of calling .decode() on them. NEXO feedback 2026-06-06 #2.' },
   { id: 'create-method-name-alias', description: 'create_method accepts `name` as an alias of `methodName` (matches create_pou), so the param-name inconsistency no longer causes a first-call InputValidationError. NEXO feedback 2026-06-06 #3.' },
@@ -237,6 +238,12 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
   // Set log level
   if (config.debug) setLogLevel('debug');
   else if (config.verbose) setLogLevel('info');
+  // Optional file sink so lifecycle markers survive a Claude Code CLI stdio
+  // recycle (stderr isn't persisted there). See --log-file.
+  if (config.logFile) {
+    setLogFile(config.logFile);
+    serverLog.info(`Lifecycle log mirrored to file: ${config.logFile}`);
+  }
 
   serverLog.info(`Starting CODESYS Persistent MCP Server v0.1.0`);
   serverLog.info(`Mode: ${config.mode}`);
@@ -3147,33 +3154,66 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   // ─── Graceful Shutdown ───────────────────────────────────────────────
 
-  const shutdown = async () => {
-    serverLog.info('Shutdown signal received');
+  // Single-shot guard: every teardown route (signal, stdin EOF, beforeExit)
+  // funnels through here, but the body must run at most once.
+  let shutdownStarted = false;
+  const shutdown = async (cause: string) => {
+    if (shutdownStarted) return;
+    shutdownStarted = true;
+    // This marker is the one NEXO asked for: it names WHY we're tearing down
+    // (which signal / stdin EOF / beforeExit) so an AB death is attributable.
+    serverLog.info(`Shutdown initiated. cause=${cause}; keepAlive=${config.keepAlive}`);
     if (launcher) {
       try {
         if (config.keepAlive) {
           // Decouple AB's lifetime from the MCP server process. The client
           // (Claude Code) recycles this server on routine events -- reconnect,
-          // /compact, config reload, client restart -- each delivering SIGTERM.
-          // Without keepAlive the handler would taskkill AB (it was spawned
-          // detached precisely so it wouldn't have to), forcing a ~2min cold
-          // start every time. With keepAlive we detach cleanly: AB keeps
-          // running, its watcher keeps heart-beating, and the NEXT server
-          // instance adopts it on startup (see adoptExisting). The explicit
-          // shutdown_codesys tool and force_reset_watcher still terminate AB.
+          // /compact, config reload, client restart. With keepAlive we detach
+          // cleanly: AB keeps running, its watcher keeps heart-beating, and the
+          // NEXT server instance adopts it on startup (see adoptExisting). The
+          // explicit shutdown_codesys tool and force_reset_watcher still
+          // terminate AB.
+          serverLog.info('keepAlive=true -> detachKeepAlive() (AB left running for adoption)');
           await launcher.detachKeepAlive();
         } else {
+          serverLog.info('keepAlive=false -> launcher.shutdown() (AB will be terminated)');
           await launcher.shutdown();
         }
       } catch {
-        serverLog.warn('Launcher shutdown failed during signal handler');
+        serverLog.warn('Launcher shutdown failed during teardown');
       }
     }
     process.exit(0);
   };
 
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', () => { void shutdown('SIGINT'); });
+  process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
+  // CRITICAL for Claude Code CLI: a stdio client that closes the pipe during an
+  // IDLE gap delivers NO signal -- stdin just hits EOF/close. Node would then
+  // exit on its own WITHOUT running the SIGTERM handler, so (with keepAlive)
+  // AB's detach path never ran and (without keepAlive) AB was orphaned. We now
+  // treat stdin end/close as an explicit teardown so detachKeepAlive() (or the
+  // clean shutdown) ALWAYS runs and is logged. This is the most likely cause of
+  // the "AB closed while idle, no marker in any log" recurrence (NEXO 2026-06-07).
+  try {
+    process.stdin.on('end', () => { void shutdown('stdin-end'); });
+    process.stdin.on('close', () => { void shutdown('stdin-close'); });
+  } catch {
+    // stdin may not be a stream in some embeddings; ignore.
+  }
+  // Last-chance marker. If something else initiates exit (e.g. the event loop
+  // drains), record it. Note: an OS job-object hard-kill (TerminateProcess)
+  // CANNOT be intercepted by any handler -- if AB dies and NONE of these
+  // markers appear in the log file, that is the signature of an external
+  // job-object kill, and attach mode is the only robust mitigation.
+  process.on('beforeExit', (code) => {
+    serverLog.info(`Process beforeExit (code=${code}); shutdownStarted=${shutdownStarted}`);
+    void shutdown('beforeExit');
+  });
+  process.on('exit', (code) => {
+    // Synchronous only -- can't await here. Just leave a breadcrumb.
+    serverLog.info(`Process exit (code=${code}); shutdownStarted=${shutdownStarted}`);
+  });
   process.on('unhandledRejection', (reason) => {
     serverLog.error(`Unhandled rejection: ${reason}`);
   });
