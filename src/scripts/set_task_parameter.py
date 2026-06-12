@@ -27,6 +27,25 @@ def _ms_to_timespan(ms):
         # accept the implicit conversion, or fail with a helpful error.
         return float(ms)
 
+def _cycle_value_for(task_obj, attr, ms):
+    """Pick the representation the task's cycle attribute actually wants.
+
+    Empirical on AC500 V3 (2026-06-12, PIOPO brief): `task.interval` is a
+    PLAIN STRING holding an IEC TIME literal ('t#10ms'), with a sibling
+    `interval_unit` ('ms'). Assigning a System.TimeSpan there 'succeeds'
+    (string property accepts the coerced ToString) but the task keeps its
+    old cycle -- a silent no-op that read back as null. So: if the current
+    value is a string, write an IEC literal; otherwise keep the TimeSpan
+    path for builds whose attribute is a real TimeSpan.
+    """
+    try:
+        cur = getattr(task_obj, attr)
+    except Exception:
+        cur = None
+    if isinstance(cur, (str, unicode)):
+        return u't#%dms' % int(ms)
+    return _ms_to_timespan(ms)
+
 try:
     print("DEBUG: set_task_parameter: Project='%s' Task='%s' "
           "cycleMs=%s watchdogMs=%s priority=%s stackBytes=%s" % (
@@ -133,8 +152,27 @@ try:
             skipped.append({'field': 'cycle_time_ms', 'reason': 'attribute_not_found'})
         else:
             try:
-                setattr(task_obj, target_attr, _ms_to_timespan(cycle_ms))
-                applied.append({'field': 'cycle_time_ms', 'attribute': target_attr, 'value': cycle_ms})
+                new_val = _cycle_value_for(task_obj, target_attr, cycle_ms)
+                setattr(task_obj, target_attr, new_val)
+                # Verify: read back and compare. The old TimeSpan write
+                # 'succeeded' while changing nothing -- never trust a bare
+                # setattr on these proxies.
+                readback = None
+                try:
+                    readback = getattr(task_obj, target_attr)
+                except Exception:
+                    pass
+                rb_str = None
+                try:
+                    rb_str = unicode(readback) if readback is not None else None
+                except Exception:
+                    pass
+                if isinstance(new_val, (str, unicode)) and rb_str is not None and rb_str.lower() != new_val.lower():
+                    skipped.append({'field': 'cycle_time_ms', 'attribute': target_attr,
+                                    'error': 'write did not stick: wrote %r, read back %r' % (new_val, rb_str)})
+                else:
+                    applied.append({'field': 'cycle_time_ms', 'attribute': target_attr,
+                                    'value': cycle_ms, 'written': unicode(new_val), 'readback': rb_str})
             except Exception as e:
                 skipped.append({'field': 'cycle_time_ms', 'attribute': target_attr, 'error': str(e)})
 
