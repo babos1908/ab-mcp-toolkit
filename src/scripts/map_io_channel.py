@@ -1,14 +1,22 @@
 import sys, scriptengine as script_engine, os, traceback
 
 DEVICE_PATH = "{DEVICE_PATH}"
-CHANNEL_PATH = "{CHANNEL_PATH}"  # e.g. "Inputs/Byte 0" or "0/3" (numeric indices)
+CHANNEL_PATH = "{CHANNEL_PATH}"  # "[ifaceSubstring:]<paramIdOrName>[/<subIndex>]" e.g. "IOBus:7000/3"
 VARIABLE_NAME = "{VARIABLE_NAME}"
 CLEAR_BINDING = "{CLEAR_BINDING}"  # "1" / "0" - if "1", remove the existing binding (variable_name ignored)
 
-# CODESYS I/O channel mapping is the second-most-fiddly part of fieldbus
-# setup (after device descriptors). The scripting API exposes it via per-
-# channel set_variable / variable accessors, but the channel object tree
-# under a device is not uniform across descriptors. We probe a few patterns.
+# I/O channels live in the device CONNECTORS (connector.host_parameters), not
+# as child objects. A channel parameter (is_mappable_io) carries a
+# ScriptIoMapping; bit-level mapping goes through the parameter's sub-elements
+# (the parameter object is itself a collection of data elements).
+#
+# CHANNEL_PATH grammar:
+#   "7000"        -> parameter id 7000 (byte/word channel)
+#   "7000/3"      -> sub-element 3 (bit) of parameter 7000
+#   "IOBus:7000"  -> restrict the search to connectors whose interface
+#                    contains 'IOBus' (case-insensitive) - needed when the
+#                    same param ids exist on several fieldbus connectors
+#   names work too: "IOBus:Digital inputs I0 - I7/0"
 
 try:
     print("DEBUG: map_io_channel: device='%s' channel='%s' var='%s' clear=%s" %
@@ -27,121 +35,171 @@ try:
     if device is None:
         raise ValueError("Device not found at path: %s" % DEVICE_PATH)
 
-    # Resolve the channel. Two addressing modes:
-    #   1. slash-separated path under the device, e.g. "Inputs/Byte 0/Bit 3"
-    #   2. raw integer index into a flat channel list, e.g. "5"
-    # Both forms walk the device's children using the standard helper.
-    channel = None
-    resolution_attempts = []
+    # ---- Parse CHANNEL_PATH ------------------------------------------------
+    iface_filter = None
+    spec = CHANNEL_PATH
+    if ':' in spec:
+        iface_filter, spec = spec.split(':', 1)
+        iface_filter = iface_filter.strip().lower()
+    sub_index = None
+    if '/' in spec:
+        spec, sub_part = spec.rsplit('/', 1)
+        sub_part = sub_part.strip()
+        if not sub_part.isdigit():
+            raise ValueError("Sub-element index must be numeric, got '%s'." % sub_part)
+        sub_index = int(sub_part)
+    spec = spec.strip()
+    spec_is_id = spec.isdigit()
 
-    # Attempt 1: numeric index (single integer or comma list).
-    is_numeric_path = all(seg.strip().isdigit() for seg in CHANNEL_PATH.replace(',', '/').split('/') if seg.strip())
-    if is_numeric_path:
+    # ---- Locate the channel parameter across connectors --------------------
+    conns = getattr(device, 'connectors', None)
+    if conns is None:
+        raise RuntimeError("Device has no 'connectors'; cannot reach I/O channels on this node.")
+
+    matches = []  # (connector, param, iface_name)
+    seen_ifaces = []
+    for conn in conns:
+        iface = u''
         try:
-            current = device
-            for seg in CHANNEL_PATH.replace(',', '/').split('/'):
-                seg = seg.strip()
-                if not seg:
-                    continue
-                idx = int(seg)
-                children = list(current.get_children(False))
-                if idx >= len(children):
-                    raise ValueError("Index %d out of range (%d children)" % (idx, len(children)))
-                current = children[idx]
-            channel = current
-            resolution_attempts.append("numeric path '%s'" % CHANNEL_PATH)
-        except Exception as e:
-            resolution_attempts.append("numeric path failed: %s" % e)
-
-    # Attempt 2: name-based traversal via the standard helper, but rooted at
-    # the device (not the project root).
-    if channel is None:
+            iface = unicode(getattr(conn, 'interface', '') or '')
+        except Exception:
+            pass
+        seen_ifaces.append(iface)
+        if iface_filter and iface_filter not in iface.lower():
+            continue
+        pset = getattr(conn, 'host_parameters', None)
+        if pset is None:
+            continue
         try:
-            # find_object_by_path_robust starts from a node and walks; pass
-            # the device itself as start_node.
-            channel = find_object_by_path_robust(device, CHANNEL_PATH, "channel")
-            if channel is not None:
-                resolution_attempts.append("name path '%s'" % CHANNEL_PATH)
-        except Exception as e:
-            resolution_attempts.append("name path failed: %s" % e)
-
-    if channel is None:
-        raise ValueError(
-            "Channel not found at '%s' under '%s'. Tried: %s. Use inspect_device_node "
-            "to discover the actual channel layout for this device." %
-            (CHANNEL_PATH, DEVICE_PATH, ' | '.join(resolution_attempts))
-        )
-
-    channel_name = getattr(channel, 'get_name', lambda: '?')()
-    channel_class = type(channel).__name__
-    print("DEBUG: Resolved channel '%s' (%s)" % (channel_name, channel_class))
-
-    # Read existing binding before mutating - so we can show before/after.
-    before_binding = None
-    for attr in ('variable', 'mapped_variable', 'symbol'):
-        if hasattr(channel, attr):
+            plist = list(pset)
+        except Exception:
+            continue
+        for p in plist:
             try:
-                v = getattr(channel, attr)
-                before_binding = _to_unicode(unicode(v) if v is not None and not isinstance(v, unicode) else v) if v is not None else None
-                break
+                if spec_is_id:
+                    if int(getattr(p, 'id', -1)) != int(spec):
+                        continue
+                else:
+                    pname = unicode(getattr(p, 'name', '') or '')
+                    pvis = unicode(getattr(p, 'visible_name', '') or '')
+                    if spec.lower() not in (pname.lower(), pvis.lower()):
+                        continue
+                matches.append((conn, p, iface))
             except Exception:
-                pass
+                continue
 
-    # Apply the binding (or clear it).
+    if not matches:
+        raise ValueError(
+            "No parameter matching '%s' found on '%s' (interface filter: %s). "
+            "Connector interfaces present: %s. Use inspect_device_node to list channels." %
+            (spec, DEVICE_PATH, iface_filter or '(none)', ', '.join(seen_ifaces)))
+    if len(matches) > 1:
+        raise ValueError(
+            "Parameter '%s' is ambiguous on '%s': found on connectors %s. "
+            "Prefix the channel path with an interface substring, e.g. 'IOBus:%s'." %
+            (spec, DEVICE_PATH, ', '.join(m[2] for m in matches), spec))
+
+    conn, param, iface = matches[0]
+    target = param
+    target_label = u"%s (id=%s)" % (unicode(getattr(param, 'name', '?')), unicode(getattr(param, 'id', '?')))
+
+    # ---- Optional bit-level sub-element ------------------------------------
+    if sub_index is not None:
+        subs = None
+        sub_errors = []
+        try:
+            subs = list(param)
+        except Exception as e:
+            sub_errors.append("list(param) failed: %s" % e)
+        if subs is None and hasattr(param, 'DataElement'):
+            try:
+                subs = list(param.DataElement)
+            except Exception as e:
+                sub_errors.append("list(param.DataElement) failed: %s" % e)
+        if not subs:
+            raise ValueError(
+                "Parameter %s has no enumerable sub-elements (%s). has_sub_elements=%s" %
+                (target_label, ' | '.join(sub_errors),
+                 getattr(param, 'has_sub_elements', '?')))
+        if sub_index >= len(subs):
+            raise ValueError("Sub-element index %d out of range: %s has %d sub-elements." %
+                             (sub_index, target_label, len(subs)))
+        target = subs[sub_index]
+        target_label = u"%s / bit %d (%s)" % (target_label, sub_index,
+                                              unicode(getattr(target, 'name', '?')))
+
+    print("DEBUG: Resolved channel: %s on connector '%s'" % (target_label, iface))
+
+    # ---- Get the ScriptIoMapping handle ------------------------------------
+    iom = getattr(target, 'io_mapping', None)
+    if iom is None:
+        raise RuntimeError(
+            "Element %s exposes no io_mapping (is_mappable_io=%s). Element members: %s" %
+            (target_label, getattr(target, 'is_mappable_io', '?'),
+             ', '.join(sorted(m for m in dir(target) if not m.startswith('_')))))
+
+    iom_dir = sorted(m for m in dir(iom) if not m.startswith('_'))
+    print("DEBUG: io_mapping members: %s" % ', '.join(iom_dir))
+
+    def _read_binding(m):
+        for attr in ('variable', 'mapped_variable', 'symbol'):
+            if hasattr(m, attr):
+                try:
+                    v = getattr(m, attr)
+                    if v is not None:
+                        s = unicode(v)
+                        if s:
+                            return s
+                except Exception:
+                    pass
+        return None
+
+    before_binding = _read_binding(iom)
+    target_value = u"" if clear_binding else _to_unicode(VARIABLE_NAME)
+
     set_attempts = []
     success = False
     last_err = None
 
-    target_value = u"" if clear_binding else _to_unicode(VARIABLE_NAME)
-
-    # Attempt 1: channel.set_variable(name)
-    if not success and hasattr(channel, 'set_variable'):
+    # Attempt 1: iom.variable = name (canonical ScriptIoMapping surface)
+    if not success and hasattr(iom, 'variable'):
         try:
-            channel.set_variable(target_value)
+            iom.variable = target_value
             success = True
-            set_attempts.append("channel.set_variable(name)")
+            set_attempts.append("io_mapping.variable = name")
         except Exception as e:
             last_err = e
-            set_attempts.append("set_variable failed: %s" % e)
+            set_attempts.append("io_mapping.variable= failed: %s" % e)
 
-    # Attempt 2: channel.variable = name (property setter)
-    if not success and hasattr(channel, 'variable'):
+    # Attempt 2: iom.set_variable(name)
+    if not success and hasattr(iom, 'set_variable'):
         try:
-            channel.variable = target_value
+            iom.set_variable(target_value)
             success = True
-            set_attempts.append("channel.variable = name")
+            set_attempts.append("io_mapping.set_variable(name)")
         except Exception as e:
             last_err = e
-            set_attempts.append("variable= failed: %s" % e)
+            set_attempts.append("io_mapping.set_variable failed: %s" % e)
 
-    # Attempt 3: channel.symbol = name (older API surface)
-    if not success and hasattr(channel, 'symbol'):
-        try:
-            channel.symbol = target_value
-            success = True
-            set_attempts.append("channel.symbol = name")
-        except Exception as e:
-            last_err = e
-            set_attempts.append("symbol= failed: %s" % e)
+    # Attempt 3: legacy element-level surface (non-driver descriptors)
+    for attr in ('set_variable',):
+        if not success and hasattr(target, attr):
+            try:
+                getattr(target, attr)(target_value)
+                success = True
+                set_attempts.append("element.%s(name)" % attr)
+            except Exception as e:
+                last_err = e
+                set_attempts.append("element.%s failed: %s" % (attr, e))
 
     if not success:
         raise RuntimeError(
-            "Could not %s channel binding via any known API. Tried: %s. "
-            "Last error: %s. Some channels are read-only or only mappable via "
-            "the IDE I/O Mapping tab." %
-            ("clear" if clear_binding else "set", ' | '.join(set_attempts), last_err)
-        )
+            "Could not %s channel binding. Tried: %s. Last error: %s. "
+            "io_mapping members: %s" %
+            ("clear" if clear_binding else "set", ' | '.join(set_attempts),
+             last_err, ', '.join(iom_dir)))
 
-    # Read back the final binding for confirmation.
-    after_binding = None
-    for attr in ('variable', 'mapped_variable', 'symbol'):
-        if hasattr(channel, attr):
-            try:
-                v = getattr(channel, attr)
-                after_binding = _to_unicode(unicode(v) if v is not None and not isinstance(v, unicode) else v) if v is not None else None
-                break
-            except Exception:
-                pass
+    after_binding = _read_binding(iom)
 
     primary_project.save()
     print("DEBUG: Project saved.")
@@ -149,18 +207,18 @@ try:
     emit_result({
         u"device_path": _to_unicode(DEVICE_PATH),
         u"channel_path": _to_unicode(CHANNEL_PATH),
-        u"channel_name": _to_unicode(channel_name),
-        u"channel_class": _to_unicode(channel_class),
-        u"variable_before": before_binding,
-        u"variable_after": after_binding,
+        u"channel_name": _to_unicode(target_label),
+        u"connector_interface": _to_unicode(iface),
+        u"variable_before": _to_unicode(before_binding) if before_binding else None,
+        u"variable_after": _to_unicode(after_binding) if after_binding else None,
         u"cleared": clear_binding,
-        u"resolution_attempts": resolution_attempts,
         u"set_attempts": set_attempts,
+        u"io_mapping_members": [_to_unicode(m) for m in iom_dir],
     })
     if clear_binding:
-        print("Cleared binding on %s/%s (was: %s)" % (DEVICE_PATH, channel_name, before_binding))
+        print("Cleared binding on %s :: %s (was: %s)" % (DEVICE_PATH, target_label, before_binding))
     else:
-        print("Mapped %s/%s -> %s (was: %s)" % (DEVICE_PATH, channel_name, VARIABLE_NAME, before_binding))
+        print("Mapped %s :: %s -> %s (was: %s)" % (DEVICE_PATH, target_label, VARIABLE_NAME, before_binding))
     print("SCRIPT_SUCCESS: I/O channel binding updated.")
     sys.exit(0)
 except Exception as e:
