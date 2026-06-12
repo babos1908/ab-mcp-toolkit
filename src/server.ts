@@ -134,6 +134,9 @@ async function fileExists(filePath: string): Promise<boolean> {
  * roughly chronological. Each entry maps a short stable ID to a description.
  */
 const MCP_PATCHES: Array<{ id: string; description: string }> = [
+  { id: 'remove-library-tool', description: 'remove_library tool: removes a library REFERENCE from the project Library Manager via ScriptLibManObject.get_libraries(recursive)/remove_library(name) -- works on AB 2.9 where references are not enumerable children (children=0). System #-prefixed references refused. Field-validated 2026-06-12 on an AC500 V3 consumer (reference removed, compile clean). PIOPO brief Gap 1.' },
+  { id: 'project-info-ac500-accessor', description: 'get_project_info / set_project_info now work on AC500 V3 .project files: primary accessor is the callable project.get_project_info() (the attribute probes are absent there), with find("Project Information", True) as fallback (the plain children walk does not descend to the node). Also fixes list_project_libraries on the same builds via get_libraries() (was reporting "No libraries found" with references present). PIOPO brief Gap 2.' },
+  { id: 'device-id-resolution-update-in-place', description: 'add_device: vendor string DeviceID resolution from repository (ABB "1020 0703" via numeric tail + version match), __update__:<path> sentinel for in-place device swap preserving the Application (validated PM5650->PM5670), __root__ sentinel for top-level add. map_io_channel rewritten for connector.host_parameters channels with [iface:]<paramId>[/<bit>] grammar (validated 28/28 channels). inspect_device_node: device_identification + connector/channel/mapped_variable dump. Authored by the PIOPO PLC agent.' },
   { id: 'teardown-markers-and-logfile', description: 'Diagnose + harden AB-died-on-recycle. (1) --log-file <path> mirrors lifecycle logs to a file with SYNCHRONOUS appends (stderr is not persisted under Claude Code CLI), so detachKeepAlive / Force-killing / soft-probe / teardown-cause markers survive an abrupt teardown. (2) shutdown now funnels through one guarded handler that logs cause= and runs on stdin end/close + beforeExit, not just SIGINT/SIGTERM -- a Claude Code CLI stdio close during an IDLE gap delivers no signal, so previously detachKeepAlive() never ran and AB could be orphaned/killed with NO marker in any log. (3) If AB dies and NONE of these markers appear, that is the signature of an OS job-object hard-kill (uninterceptable) -> attach mode is the robust mitigation. NEXO 2026-06-07 #6 recurrence.' },
   { id: 'path-resolution-uniform', description: 'find_object_by_path_robust gains a leaf-name recursive fallback: when strict folder-by-folder traversal fails (e.g. a library POU at "MyLib/Function Blocks/FB_X" whose folders are not direct children of the root), it retries an unambiguous recursive find of the last segment from project + Application roots. Makes full-from-root, folder/leaf, and bare-leaf path forms resolve uniformly across ALL tools. delete_object no longer blanket-refuses bare names -- only exact system paths + known system leaves. Tool descriptions document the accepted path forms. NEXO feedback 2026-06-06 #1.' },
   { id: 'project-info-version-decode-fix', description: 'get_project_info no longer returns "ERR: Version object has no attribute decode": _to_unicode() coerces non-str objects (e.g. the .NET Version proxy) via unicode() instead of calling .decode() on them. NEXO feedback 2026-06-06 #2.' },
@@ -2717,6 +2720,33 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       return formatToolResponse(
         result,
         `Library '${args.libraryName}' added to ${args.projectFilePath}. Project saved.`
+      );
+    }
+  );
+
+  s.tool(
+    'remove_library',
+    "Removes a library REFERENCE from the project's Library Manager (the project stops referencing it; the machine-wide repository is untouched -- for that use uninstall_library_from_repository). Works even on builds where references are not enumerable child objects (uses ScriptLibManObject.get_libraries/remove_library). System '#'-prefixed references are refused. Accepts the exact display string ('MyLib, * (Vendor)') or an unambiguous substring ('MyLib').",
+    {
+      projectFilePath: z.string().describe("Path to the project file."),
+      libraryName: z.string().min(1).describe("Library reference to remove: exact display string or unambiguous substring (case-insensitive)."),
+    },
+    async (args: { projectFilePath: string; libraryName: string }) => {
+      const escaped = resolvePath(args.projectFilePath, workspaceDir);
+      const script = scriptManager.prepareScriptWithHelpers(
+        'remove_library',
+        {
+          PROJECT_FILE_PATH: escaped,
+          LIBRARY_NAME: args.libraryName.trim(),
+        },
+        ['_text_utils', 'ensure_project_open']
+      );
+      // Destructive on the project file: snapshot first (no-op if disabled).
+      await backupManager.snapshot(escaped);
+      const result = await executor.executeScript(script);
+      return formatStructuredResponse(
+        result,
+        `Library reference '${args.libraryName}' removed from ${args.projectFilePath}. Project saved.`
       );
     }
   );

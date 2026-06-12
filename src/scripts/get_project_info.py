@@ -6,7 +6,22 @@ try:
 
     info = None
     info_source = None
+    # Primary accessor: callable project.get_project_info() -- the one that
+    # actually exists on AB 2.9 AC500 .project files (field-validated
+    # 2026-06-12; the attribute probes below all come back empty there but
+    # this method returns the info object with version/title/author/company/
+    # description settable).
+    if hasattr(primary_project, 'get_project_info'):
+        try:
+            cand = primary_project.get_project_info()
+            if cand is not None:
+                info = cand
+                info_source = "primary_project.get_project_info()"
+        except Exception as gpi_err:
+            print("DEBUG: get_project_info() raised: %s" % gpi_err)
     for attr in ('project_info', 'project_information', 'information', 'projectinfo'):
+        if info is not None:
+            break
         if hasattr(primary_project, attr):
             try:
                 cand = getattr(primary_project, attr)
@@ -17,6 +32,17 @@ try:
             except Exception:
                 pass
 
+    if info is None:
+        # Recursive find reaches the node even when the plain children walk
+        # does not descend into it (same class of issue as the old
+        # task-configuration bug).
+        try:
+            found = primary_project.find('Project Information', True)
+            if found:
+                info = found[0]
+                info_source = "find('Project Information')"
+        except Exception:
+            pass
     if info is None:
         try:
             for child in primary_project.get_children(True):

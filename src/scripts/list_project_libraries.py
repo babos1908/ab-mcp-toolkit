@@ -34,7 +34,40 @@ try:
     if lib_manager:
         print("DEBUG: Library Manager found: %s" % getattr(lib_manager, 'get_name', lambda: '?')())
 
-        # Try to enumerate libraries
+        # Primary path: ScriptLibManObject.get_libraries(recursive) -- works on
+        # AB 2.9 even when the Library Manager has 0 enumerable children (the
+        # references are NOT child objects on these builds; empirical
+        # 2026-06-12 on an AC500 V3 consumer: children=0 but get_libraries()
+        # returned all 15 references). Names come back as the display string
+        # ('MyLib, * (Vendor)'); system/hidden references are '#'-prefixed.
+        if hasattr(lib_manager, 'get_libraries'):
+            try:
+                for raw in lib_manager.get_libraries(False):
+                    disp = _to_unicode(raw)
+                    entry = {'name': disp}
+                    if disp.startswith('#'):
+                        entry['name'] = disp[1:]
+                        entry['hidden'] = True
+                    # split 'Name, version (Vendor)' when present
+                    if ',' in entry['name']:
+                        base, rest = entry['name'].split(',', 1)
+                        entry['name'] = base.strip()
+                        rest = rest.strip()
+                        if rest.endswith(')') and '(' in rest:
+                            ver, vendor = rest.rsplit('(', 1)
+                            entry['version'] = ver.strip()
+                            entry['company'] = vendor[:-1].strip()
+                        else:
+                            entry['version'] = rest
+                    entry['displayName'] = disp
+                    libraries.append(entry)
+                print("DEBUG: get_libraries() returned %d references." % len(libraries))
+            except Exception as gl_err:
+                print("WARN: get_libraries() failed (%s); falling back to children walk." % gl_err)
+
+    if lib_manager and not libraries:
+        # Fallback: legacy children enumeration (older builds where references
+        # ARE child objects).
         try:
             lib_children = lib_manager.get_children(False)
             for lib_child in lib_children:
@@ -68,7 +101,7 @@ try:
         print("WARN: Library Manager not found in project.")
 
     for entry in libraries:
-        for k in ('name', 'version', 'company'):
+        for k in ('name', 'version', 'company', 'displayName'):
             if k in entry:
                 entry[k] = _to_unicode(entry[k])
     libs_json = json.dumps(libraries, ensure_ascii=False)

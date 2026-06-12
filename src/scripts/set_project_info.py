@@ -16,7 +16,21 @@ try:
     # a couple of possible entry points. Probe them in order.
     info = None
     info_source = None
+    # Primary accessor: callable project.get_project_info() -- the one that
+    # works on AB 2.9 AC500 .project files (field-validated 2026-06-12: the
+    # attribute probes below come back empty there; this method returns the
+    # info object with version/title/author/company/description settable).
+    if hasattr(primary_project, 'get_project_info'):
+        try:
+            cand = primary_project.get_project_info()
+            if cand is not None:
+                info = cand
+                info_source = "primary_project.get_project_info()"
+        except Exception as gpi_err:
+            print("DEBUG: get_project_info() raised: %s" % gpi_err)
     for attr in ('project_info', 'project_information', 'information', 'projectinfo'):
+        if info is not None:
+            break
         if hasattr(primary_project, attr):
             try:
                 cand = getattr(primary_project, attr)
@@ -27,6 +41,16 @@ try:
             except Exception as ae:
                 print("DEBUG: primary_project.%s raised: %s" % (attr, ae))
 
+    if info is None:
+        # Recursive find reaches the node even when the plain children walk
+        # does not descend into it.
+        try:
+            found = primary_project.find('Project Information', True)
+            if found:
+                info = found[0]
+                info_source = "find('Project Information')"
+        except Exception as ferr:
+            print("DEBUG: find('Project Information') failed: %s" % ferr)
     if info is None:
         # Alternative: the Project Information POU/node may be findable by name.
         try:
@@ -42,8 +66,8 @@ try:
     if info is None:
         raise RuntimeError(
             "Project Information node not accessible via ScriptEngine on this build. "
-            "Tried primary_project.{project_info|project_information|information|projectinfo} "
-            "and child node lookup."
+            "Tried get_project_info(), primary_project.{project_info|project_information|"
+            "information|projectinfo}, find('Project Information') and child node lookup."
         )
     print("DEBUG: Project Information accessed via %s" % info_source)
 
