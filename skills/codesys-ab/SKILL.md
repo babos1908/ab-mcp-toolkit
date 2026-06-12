@@ -49,7 +49,7 @@ Una sola volta per sessione (o dopo `shutdown_codesys`). Serve all'utente per ve
 - `open_project(filePath)` → apre `.project` esistente. **Patch 2026-05-26**: lock-aware retry — se trova `.lock` orfano con PID morto, lo rimuove e ritenta.
 - `close_project(projectFilePath, force?)` → chiude il progetto corrente. Salva prima a meno che `force=true`. **Critico per workflow library dev**: senza, switch lib↔example richiede `shutdown_codesys` + `launch_codesys` (~30-60s). Con `close_project` lo switch è <5s.
 - `create_project(filePath)` → da template Standard.project. ⚠️ Path template hardcoded può non funzionare su AB; preferire copia di un template manuale + `open_project`.
-- `create_ac500_project(newProjectPath, templateProjectPath, addLibraries?, overwrite?)` → bootstrap nuovo AC500 V3 progetto copiando un template esistente (es. NexoPlcExample vanilla). Preserva il device tree. `addLibraries` SEMICOLON-separated per evitare collision con virgole nei nomi lib.
+- `create_ac500_project(newProjectPath, templateProjectPath, addLibraries?, overwrite?)` → bootstrap nuovo AC500 V3 progetto copiando un template esistente (es. un template vanilla del target). Preserva il device tree. `addLibraries` SEMICOLON-separated per evitare collision con virgole nei nomi lib.
 - `save_project(projectFilePath)` → salva.
 - `create_project_archive(projectFilePath, archivePath?, ...)` → archive `.projectarchive`.
 - `clean_project(projectFilePath, alsoEvictPrecompileCache?)` → clean + delete `.precompilecache` / `.compileinfo` / `.bootinfo`. Usa quando il compile sembra stale.
@@ -203,8 +203,8 @@ release_library_version(libPath, '1.0.11', distFolder='./dist', gitTag=true)
 
 # A) Composite tool (single call, ~30-90s):
 diff_libraries_via_export(
-    sourceLibraryPath='dist/v1.0.5/NexoMqttLib-v1.0.5.library',
-    targetLibraryPath='dist/v1.0.10/NexoMqttLib-v1.0.10.library'
+    sourceLibraryPath='dist/v1.0.5/MyLib-v1.0.5.library',
+    targetLibraryPath='dist/v1.0.10/MyLib-v1.0.10.library'
 )
 
 # B) Manuale due step (utile se l'XML serve anche per altri usi):
@@ -217,9 +217,9 @@ diff_library_versions('dist/v1.0.5/lib.xml', 'dist/v1.0.10/lib.xml')
 ```
 # Sintomo: edit lib v1.0.x → install → consumer compile → runtime cap = vecchio valore
 # Root cause #1 più comune: consumer-side parameter override stale.
-get_library_parameters(consumerPath, 'NexoMqttLib')
+get_library_parameters(consumerPath, 'MyLib')
 # Cerca isOverridden=true con value != defaultValue → quello è il problema.
-reset_library_parameter(consumerPath, 'NexoMqttLib', 'GC_MAX_TAG_DEFINITIONS')
+reset_library_parameter(consumerPath, 'MyLib', 'GC_MAX_TAG_DEFINITIONS')
 # Root cause #2: lib repo cache stale → list_library_repository per confermare versione installata.
 # Root cause #3: compile cache stale → clean_project(consumerPath).
 ```
