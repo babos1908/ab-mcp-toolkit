@@ -141,10 +141,27 @@ export class CodesysLauncher implements ScriptExecutor {
     });
     await this.ipcClient.ensureDirectories();
 
-    // Confirm the watcher is actually answering (ready.signal present), not
-    // just leaving a warm heartbeat file behind.
-    if (!(await this.ipcClient.isReady())) {
-      launcherLog.warn('adoptExisting(): chosen session has no ready.signal; abandoning adoption.');
+    // Confirm the watcher is REALLY there. ready.signal being present is not
+    // enough: a stale dir from a crashed/exited session (or a GUI the user
+    // launched by hand and is closing) leaves the file behind while nothing
+    // is actually polling commands. Adopting such a dir was reported as
+    // "launched successfully" followed by a permanent 'launching'/PID:N/A
+    // stall (DKIT 2026-06-29). So we send a trivial no-op command and require
+    // a real reply within a short window; only a genuinely live watcher
+    // answers. On no answer we abandon adoption and let the caller cold-start.
+    const liveProbeMs = 4000;
+    let probedAlive = false;
+    try {
+      const res = await this.ipcClient.sendCommand(
+        'import sys\nprint("ADOPT_PROBE_OK")\nprint("SCRIPT_SUCCESS")\nsys.exit(0)\n',
+        liveProbeMs
+      );
+      probedAlive = res.success || (res.output || '').includes('ADOPT_PROBE_OK');
+    } catch (probeErr) {
+      launcherLog.warn(`adoptExisting(): live probe got no reply (${probeErr}); the session dir is stale.`);
+    }
+    if (!probedAlive) {
+      launcherLog.warn('adoptExisting(): chosen session did not answer a live probe; abandoning adoption (will cold-start).');
       this.ipcClient = null;
       this.pid = null;
       this.ipcDir = null;

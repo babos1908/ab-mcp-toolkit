@@ -30,30 +30,42 @@ try:
     last_err = None
     method_used = None
 
+    # Method names seen across CODESYS V3.5 SPxx / AB builds. export_plcopenxml
+    # is the documented one; the *_native / ExportPLCopenXML / export_xml
+    # variants appear on some builds where the documented name is not bound.
+    _EXPORT_METHOD_NAMES = (
+        'export_plcopenxml', 'export_plc_open_xml', 'export_xml',
+        'ExportPLCopenXML', 'export_native', 'export',
+    )
+
     def _try_export(target, name):
-        """Probe export_plcopenxml signature variants on target. Returns True
-        on success."""
-        if not hasattr(target, 'export_plcopenxml'):
-            return False
-        # Signature variants seen in CODESYS V3.5 SPxx builds:
-        #   export_plcopenxml(filepath)
-        #   export_plcopenxml(filepath, recursive)
-        #   export_plcopenxml(filepath, recursive, declarations)
-        #   export_plcopenxml(filepath, options)  -- newer
-        for args in (
-            (OUTPUT_XML_PATH,),
-            (OUTPUT_XML_PATH, True),
-            (OUTPUT_XML_PATH, True, True),
-        ):
-            try:
-                target.export_plcopenxml(*args)
-                return True
-            except TypeError:
+        """Probe export method names + signature variants on target. Returns
+        True on success, an Exception on a matched-signature real error, or
+        False when nothing was callable."""
+        tried_any = False
+        for mname in _EXPORT_METHOD_NAMES:
+            if not hasattr(target, mname):
                 continue
-            except Exception as e:
-                # Real error from a signature that matched; surface and stop.
-                return e
-        return False
+            fn = getattr(target, mname)
+            if not callable(fn):
+                continue
+            tried_any = True
+            # Signature variants:
+            #   m(filepath) / m(filepath, recursive) / m(filepath, recursive, declarations)
+            for args in (
+                (OUTPUT_XML_PATH,),
+                (OUTPUT_XML_PATH, True),
+                (OUTPUT_XML_PATH, True, True),
+            ):
+                try:
+                    fn(*args)
+                    print("DEBUG: %s.%s%s succeeded" % (name, mname, '(...)' if len(args) > 1 else '(path)'))
+                    return True
+                except TypeError:
+                    continue
+                except Exception as e:
+                    return e
+        return False if tried_any else False
 
     if app_only:
         # Try application-level first
@@ -91,8 +103,14 @@ try:
         # produce a single XML the diff tool can consume).
         print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
         raise RuntimeError(
-            "export_plcopenxml not exposed on project or active_application on "
-            "this CODESYS build. Last error: %s" % last_err
+            "PLCopen XML export is not exposed on the project or active "
+            "application on this CODESYS build (probed: %s). Last error: %s. "
+            "The offline tools (get_all_pou_code_offline / search_code_offline) "
+            "depend on this export, so they are unavailable on this build. To "
+            "read a single object's code without the export, use get_object_code "
+            "(declaration + implementation of one POU/DUT/GVL); for the whole "
+            "project use get_all_pou_code." % (
+                ', '.join(_EXPORT_METHOD_NAMES), last_err)
         )
 
     # Verify the file was actually written.

@@ -134,6 +134,9 @@ async function fileExists(filePath: string): Promise<boolean> {
  * roughly chronological. Each entry maps a short stable ID to a description.
  */
 const MCP_PATCHES: Array<{ id: string; description: string }> = [
+  { id: 'get-object-code-tool', description: 'New get_object_code tool: reads the declaration + implementation of a SINGLE POU/DUT/GVL/Method/Property by path (surgical "read the minimum"), instead of get_all_pou_code dumping the whole project. Wraps the existing get_pou_code script that was previously only reachable as a Resource (agents call tools, not resources). DKIT 2026-06-29 Gap 2; also mitigates the dead offline-XML branch on builds without PLCopen export.' },
+  { id: 'adopt-live-probe', description: 'launch_codesys adoption hardened: before adopting an existing session dir, send a no-op command and require a real reply (a stale dir from a crashed/exited watcher, or a hand-launched GUI being closed, leaves ready.signal behind but answers nothing). On no reply, abandon adoption and cold-start. launch_codesys also now verifies the launcher reached state=ready before reporting success, and returns the real state + force_reset_watcher hint otherwise (was: "launched successfully" then permanent launching/PID:N/A stall). DKIT 2026-06-29 Gap 3.' },
+  { id: 'export-plcopen-probe-and-attach-edition-hint', description: 'export_project_to_plcopen_xml probes more export method names (export_plcopenxml / export_xml / ExportPLCopenXML / export_native / export) before ERR_API_NOT_EXPOSED, and its error now points at get_object_code/get_all_pou_code as the read path when the build has no PLCopen export. attach_codesys step-1 message now leads with the PREMIUM-only requirement (Execute Script File menu is absent on Standard). DKIT 2026-06-29 Gap 1 + Gap 4.' },
   { id: 'setter-readback-verification', description: 'Close the recurring "lying success" failure mode (a setter accepts a .NET write without raising but it silently does not stick, only discovered later on the running PLC). Six setters now read the value back after writing and FAIL LOUDLY on mismatch instead of reporting false success: set_library_parameter (slot.value), reset_library_parameter (slot reverts to default), map_io_channel (binding stuck / cleared), set_library_reference_version (version resolved, with a "*" floating carve-out), rename_object (name normalization/collision), set_project_info (per-field, mismatch -> skipped not applied). New error codes ERR_WRITE_DID_NOT_STICK / ERR_RESET_DID_NOT_STICK / ERR_RENAME_DID_NOT_STICK. set_task_parameter and set_device_parameter already verified. 2026-06-29 audit follow-up.' },
   { id: 'backup-retention-dedup', description: 'BackupManager no longer leaves an unbounded pile of <file>.backup-* clutter. (1) DEDUP: skips the snapshot when the source is byte-identical to the newest existing backup (read-back-verified sets, repeated no-op edits). (2) RETENTION: after each snapshot, prunes that file\'s auto-backups to the newest N (CLI --backup-retention, default 5; 0 = unbounded). (3) New cleanup_backups tool sweeps existing piles from older sessions. ONLY files matching the exact <basename>.backup-<TS>Z pattern are ever deleted -- manual <name>.backup and unrelated files are never touched. NEXO/Admin feedback 2026-06-12.' },
   { id: 'task-cycle-iec-time-literal', description: 'set_task_parameter/get_task_configuration: on AC500 V3 the task `interval` attribute is a PLAIN STRING holding an IEC TIME literal ("t#10ms"), not a TimeSpan. The old write assigned a TimeSpan (silent no-op reported as success: PLC kept running at 10ms); the old read expected TimeSpan and returned null. Now: write emits "t#<N>ms" when the current value is a string (TimeSpan kept for builds where it is real), with a read-back verification that fails loudly if the write did not stick; read parses IEC TIME literals (t#/time#, d/h/m/s/ms/us/ns components). Field-validated 2026-06-12: set 100 -> readback 100. PIOPO brief.' },
@@ -350,14 +353,31 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         if (!adopted) {
           await launcher.launch();
         }
+        // Verify the launcher actually reached 'ready' before claiming success.
+        // launch()/adoptExisting() can leave the state non-ready (e.g. the
+        // watcher never signalled), and reporting "launched successfully" while
+        // the state is still 'launching'/'error' is exactly the misleading
+        // message DKIT (2026-06-29) hit, followed by every command failing with
+        // "launcher state is 'launching'". Surface the real state + recovery
+        // hint instead.
+        const st = await launcher.getStatusAsync();
+        if (st.state !== 'ready') {
+          return {
+            content: [{ type: 'text' as const, text:
+              `CODESYS ${adopted ? 'adoption' : 'launch'} did NOT reach ready: state='${st.state}', PID=${st.pid ?? 'N/A'}` +
+              `${st.lastError ? `, lastError: ${st.lastError}` : ''}. ` +
+              `Call force_reset_watcher to kill any half-started instance and cold-start cleanly.` }],
+            isError: true,
+          };
+        }
         // Swap in the RESILIENT wrapper, not the raw launcher, so command
         // timeouts trigger auto-recovery via forceReset().
         executor.swapNow(resilientLauncher!);
         executionMode = 'persistent';
         return {
           content: [{ type: 'text' as const, text: adopted
-            ? 'Adopted the already-running CODESYS instance (no cold start). Persistent mode active.'
-            : 'CODESYS launched successfully in persistent mode.' }],
+            ? `Adopted the already-running CODESYS instance (no cold start). Persistent mode active. PID ${st.pid ?? 'N/A'}.`
+            : `CODESYS launched successfully in persistent mode. PID ${st.pid ?? 'N/A'}.` }],
           isError: false,
         };
       } catch (err) {
@@ -388,6 +408,8 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         if (!confirm) {
           const { watcherPath, sessionId } = await launcher.prepareAttach();
           const text = [
+            '⚠️ EDITION REQUIREMENT: attach_codesys needs "Tools → Scripting → Execute Script File…", which exists ONLY on Automation Builder/CODESYS PREMIUM. On STANDARD edition that menu is absent and this flow cannot complete — use launch_codesys instead (the MCP spawns its own instance). Confirm the edition before proceeding (Help → About).',
+            '',
             'Watcher prepared. The MCP server is NOT spawning CODESYS — please do these two things in your already-running CODESYS / Automation Builder GUI:',
             '',
             '  1. (Optional) Open the project you want to work on.',
@@ -1806,8 +1828,52 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
   );
 
   s.tool(
+    'get_object_code',
+    "Reads the declaration + implementation code of a SINGLE POU/DUT/GVL/Method/Property by path -- the surgical 'read the minimum' reader, vs get_all_pou_code which dumps the whole project. Accepts the same path forms as set_pou_code: full-from-root 'Application/MyPOU', library 'MyLib/Function Blocks/FB_X[/Method]', or an unambiguous bare leaf name. Read-only: refuses to switch the open project.",
+    {
+      projectFilePath: z.string().describe("Path to the project file (must already be the open project)."),
+      objectPath: z.string().min(1).describe("Path to the target object. Forms: 'Application/MyPOU', 'MyLib/Function Blocks/FB_X[/Method]', or an unambiguous bare leaf name ('FB_X', 'MyGVL')."),
+    },
+    async (args: { projectFilePath: string; objectPath: string }) => {
+      const escProjPath = resolvePath(args.projectFilePath, workspaceDir);
+      const sanPath = sanitizePouPath(args.objectPath);
+      const script = scriptManager.prepareScriptWithHelpers(
+        'get_pou_code',
+        { PROJECT_FILE_PATH: escProjPath, POU_FULL_PATH: sanPath },
+        ['_text_utils', 'require_project_open', 'find_object_by_path']
+      );
+      const result = await executor.executeScript(script);
+      const success = result.success && result.output.includes('SCRIPT_SUCCESS');
+      if (!success) {
+        return formatToolResponse(result, '');
+      }
+      // The get_pou_code script emits DECL/IMPL marker blocks (same as the
+      // pou-code resource). Parse them into a clean response.
+      const declStart = '### POU DECLARATION START ###';
+      const declEnd = '### POU DECLARATION END ###';
+      const implStart = '### POU IMPLEMENTATION START ###';
+      const implEnd = '### POU IMPLEMENTATION END ###';
+      const between = (a: string, b: string): string | null => {
+        const i = result.output.indexOf(a);
+        const j = result.output.indexOf(b);
+        if (i === -1 || j === -1 || i >= j) return null;
+        return result.output.substring(i + a.length, j).trim();
+      };
+      const declaration = between(declStart, declEnd);
+      const implementation = between(implStart, implEnd);
+      if (declaration === null && implementation === null) {
+        return { content: [{ type: 'text' as const, text: `No code found for '${sanPath}'. Output:\n${result.output}` }], isError: true };
+      }
+      const parts: string[] = [`Code for '${sanPath}':`];
+      if (declaration !== null) parts.push('--- Declaration ---\n' + declaration);
+      if (implementation !== null && implementation !== '') parts.push('--- Implementation ---\n' + implementation);
+      return { content: [{ type: 'text' as const, text: parts.join('\n\n') }], isError: false };
+    }
+  );
+
+  s.tool(
     'get_all_pou_code',
-    'Reads the declaration and implementation code of every POU/DUT/GVL in the project. Returns all code in a single response for bulk review.',
+    'Reads the declaration and implementation code of every POU/DUT/GVL in the project. Returns all code in a single response for bulk review. For a SINGLE object, prefer get_object_code (much less output).',
     {
       projectFilePath: z.string().describe("Path to the project file."),
     },
