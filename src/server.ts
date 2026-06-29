@@ -134,6 +134,7 @@ async function fileExists(filePath: string): Promise<boolean> {
  * roughly chronological. Each entry maps a short stable ID to a description.
  */
 const MCP_PATCHES: Array<{ id: string; description: string }> = [
+  { id: 'backup-retention-dedup', description: 'BackupManager no longer leaves an unbounded pile of <file>.backup-* clutter. (1) DEDUP: skips the snapshot when the source is byte-identical to the newest existing backup (read-back-verified sets, repeated no-op edits). (2) RETENTION: after each snapshot, prunes that file\'s auto-backups to the newest N (CLI --backup-retention, default 5; 0 = unbounded). (3) New cleanup_backups tool sweeps existing piles from older sessions. ONLY files matching the exact <basename>.backup-<TS>Z pattern are ever deleted -- manual <name>.backup and unrelated files are never touched. NEXO/Admin feedback 2026-06-12.' },
   { id: 'task-cycle-iec-time-literal', description: 'set_task_parameter/get_task_configuration: on AC500 V3 the task `interval` attribute is a PLAIN STRING holding an IEC TIME literal ("t#10ms"), not a TimeSpan. The old write assigned a TimeSpan (silent no-op reported as success: PLC kept running at 10ms); the old read expected TimeSpan and returned null. Now: write emits "t#<N>ms" when the current value is a string (TimeSpan kept for builds where it is real), with a read-back verification that fails loudly if the write did not stick; read parses IEC TIME literals (t#/time#, d/h/m/s/ms/us/ns components). Field-validated 2026-06-12: set 100 -> readback 100. PIOPO brief.' },
   { id: 'remove-library-tool', description: 'remove_library tool: removes a library REFERENCE from the project Library Manager via ScriptLibManObject.get_libraries(recursive)/remove_library(name) -- works on AB 2.9 where references are not enumerable children (children=0). System #-prefixed references refused. Field-validated 2026-06-12 on an AC500 V3 consumer (reference removed, compile clean). PIOPO brief Gap 1.' },
   { id: 'project-info-ac500-accessor', description: 'get_project_info / set_project_info now work on AC500 V3 .project files: primary accessor is the callable project.get_project_info() (the attribute probes are absent there), with find("Project Information", True) as fallback (the plain children walk does not descend to the node). Also fixes list_project_libraries on the same builds via get_libraries() (was reporting "No libraries found" with references present). PIOPO brief Gap 2.' },
@@ -289,7 +290,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
   // BackupManager: snapshots .project/.library files before destructive
   // tool handlers run. Created once and shared across all handlers.
   // Opt-out via config.autoBackup = false (CLI: --no-auto-backup).
-  const backupManager = new BackupManager({ autoBackup: config.autoBackup });
+  const backupManager = new BackupManager({ autoBackup: config.autoBackup, retention: config.backupRetention });
 
   if (config.mode === 'persistent') {
     launcher = new CodesysLauncher(config);
@@ -831,6 +832,32 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         result,
         `Code set for '${sanPouPath}' in ${args.projectFilePath}. Project saved.`
       );
+    }
+  );
+
+  s.tool(
+    'cleanup_backups',
+    "Sweep up the auto-backup snapshots (<file>.backup-YYYYMMDDTHHMMSSZ) that destructive tools leave next to .project/.library files, keeping only the newest N per source. Going forward, backups are auto-pruned and identical-to-newest snapshots are skipped, so this is mainly for clearing piles left by older sessions. ONLY deletes files matching the exact timestamped auto-backup pattern -- manual '<name>.backup' files and anything else are never touched. Does not require CODESYS to be running.",
+    {
+      directory: z.string().min(1).describe("Folder to sweep (typically the project folder containing the .project/.library and its .backup-* files)."),
+      keep: z.number().int().min(0).describe("How many newest backups to keep per source file. 0 = delete all auto-backups. Default: the server's --backup-retention (5).").optional(),
+    },
+    async (args: { directory: string; keep?: number }) => {
+      const dir = resolvePath(args.directory, workspaceDir);
+      try {
+        const summary = backupManager.cleanupDir(dir, args.keep);
+        const lines = [
+          `Cleaned auto-backups in ${dir}.`,
+          `Examined ${summary.examined}, removed ${summary.removed}, kept ${summary.kept}.`,
+        ];
+        for (const f of summary.perFile.filter((p) => p.removed > 0)) {
+          lines.push(`  - ${path.basename(f.source)}: removed ${f.removed}, kept ${f.kept}`);
+        }
+        return { content: [{ type: 'text' as const, text: lines.join('\n') }], isError: false };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: 'text' as const, text: `cleanup_backups failed: ${msg}` }], isError: true };
+      }
     }
   );
 

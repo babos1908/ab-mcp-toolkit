@@ -193,6 +193,12 @@ export interface ServerConfig extends LauncherConfig {
    */
   autoBackup: boolean;
   /**
+   * How many auto-backup snapshots to keep per source file (newest wins;
+   * older auto-pruned after each snapshot; identical-to-newest skipped).
+   * 0 = unbounded (old behaviour). CLI: --backup-retention <n>. Default 5.
+   */
+  backupRetention?: number;
+  /**
    * Optional path to mirror server lifecycle logs to a file (in addition to
    * stderr). Under Claude Code CLI a stdio server's stderr isn't persisted, so
    * lifecycle markers (detachKeepAlive / Force-killing / soft-probe / teardown

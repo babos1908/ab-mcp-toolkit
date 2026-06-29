@@ -42,6 +42,7 @@ program
   )
   .option('--no-auto-launch', 'Do not auto-launch CODESYS on startup')
   .option('--no-auto-backup', 'Disable automatic .project/.library snapshots before destructive tools (default: ON). Snapshots are saved as <path>.backup-YYYYMMDDTHHMMSSZ next to the source file.')
+  .option('--backup-retention <n>', 'How many auto-backup snapshots to keep per file (newest wins; older auto-pruned). Identical-to-newest snapshots are skipped. 0 = unbounded. Default: 5.', '5')
   .option('--fallback-headless', 'Fall back to headless if persistent fails', true)
   .option('--keep-alive', 'Keep CODESYS running after server stops', false)
   .option('--kill-existing-codesys', 'Kill any running CODESYS.exe before launching (dev convenience; off by default)', false)
@@ -99,6 +100,7 @@ if (opts.detect) {
     // commander turns --no-auto-backup into opts.autoBackup === false.
     // Default ON unless explicitly opted out.
     autoBackup: opts.autoBackup !== false,
+    backupRetention: (() => { const n = parseInt(opts.backupRetention, 10); return isNaN(n) ? 5 : n; })(),
     keepAlive: opts.keepAlive || false,
     killExistingCodesys: opts.killExistingCodesys || false,
     timeoutMs: cmdTimeoutMs,
