@@ -102,8 +102,24 @@ try:
             # corrupted to NUL (see _text_utils.to_codesys_text).
             value_u = to_codesys_text(value)
             setattr(info, target_attr, value_u)
-            applied.append({'field': label, 'attribute': target_attr, 'new_value': value_u})
-            print("DEBUG: info.%s = %r" % (target_attr, value_u))
+            # Read-back verification: a COM/explicit-interface proxy can accept
+            # setattr and discard it ("lying success"). Re-read and compare;
+            # treat a mismatch as a skipped (failed) field, not an applied one.
+            rb = None
+            try:
+                rv = getattr(info, target_attr)
+                rb = to_codesys_text(rv) if rv is not None else u''
+            except Exception:
+                rb = None
+            if rb is not None and rb.strip() != value_u.strip():
+                skipped.append({'field': label, 'attribute': target_attr,
+                                'reason': 'write_did_not_stick',
+                                'wrote': value_u, 'readback': rb})
+                print("WARN: info.%s did not stick: wrote %r, read back %r" % (target_attr, value_u, rb))
+            else:
+                applied.append({'field': label, 'attribute': target_attr,
+                                'new_value': value_u, 'readback': rb})
+                print("DEBUG: info.%s = %r (verified)" % (target_attr, value_u))
         except Exception as set_err:
             skipped.append({'field': label, 'reason': 'setattr_failed', 'error': str(set_err)})
 

@@ -151,6 +151,28 @@ try:
             "del collection[key], slot.value=default. Last error: %s" % (
                 PARAMETER_NAME, last_err))
 
+    # Read-back verification: a reset (especially the soft 'slot.value=default'
+    # path) can be accepted without raising yet leave the slot unchanged or the
+    # override flag still set -- the "lying success" failure mode. If we
+    # recorded a default and the slot is still re-readable, confirm it now
+    # reads as the default; FAIL LOUDLY on mismatch so a no-op reset isn't
+    # reported as success.
+    readback = None
+    try:
+        rv = getattr(target_slot, 'value', None)
+        readback = _to_unicode(unicode(rv)) if rv is not None else None
+    except Exception:
+        pass
+    if default_value is not None and readback is not None:
+        want = _to_unicode(unicode(default_value)).strip()
+        got = readback.strip()
+        if got != want:
+            print("SCRIPT_ERROR_CODE: ERR_RESET_DID_NOT_STICK")
+            raise RuntimeError(
+                "Parameter '%s' reset did not stick: expected default %r but slot "
+                "still reads %r (reset via %s). The override was not actually "
+                "cleared." % (PARAMETER_NAME, want, got, reset_via))
+
     try:
         primary_project.save()
     except Exception as se:
@@ -160,6 +182,7 @@ try:
         u'library': _to_unicode(LIBRARY_NAME),
         u'parameter': _to_unicode(PARAMETER_NAME),
         u'defaultValueRecorded': _to_unicode(unicode(default_value)) if default_value is not None else None,
+        u'valueReadback': readback,
         u'resetVia': _to_unicode(reset_via),
     })
     print("SCRIPT_SUCCESS: Library parameter override reset.")

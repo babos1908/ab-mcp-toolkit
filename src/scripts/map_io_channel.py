@@ -201,6 +201,28 @@ try:
 
     after_binding = _read_binding(iom)
 
+    # Read-back verification: a property assignment ('iom.variable = name')
+    # can be accepted without raising yet silently NOT stick (the recurring
+    # "lying success" failure mode on CODESYS .NET proxies). Compare the
+    # post-write binding to what we asked for and FAIL LOUDLY on mismatch,
+    # instead of reporting success for an I/O map that didn't take -- a wrong
+    # or missing channel binding is a real plant-safety issue.
+    if clear_binding:
+        if after_binding:  # _read_binding returns None/empty when cleared
+            raise RuntimeError(
+                "Clear binding did not stick on %s :: %s: still bound to '%s' "
+                "after the write (tried: %s). The scripting API accepted the "
+                "assignment but it had no effect." % (
+                    DEVICE_PATH, target_label, after_binding, ' | '.join(set_attempts)))
+    else:
+        ab = _to_unicode(after_binding) if after_binding else u""
+        if ab.strip() != target_value.strip():
+            raise RuntimeError(
+                "I/O mapping did not stick on %s :: %s: wrote '%s' but read back "
+                "'%s' (tried: %s). The scripting API accepted the assignment but "
+                "it had no effect." % (
+                    DEVICE_PATH, target_label, target_value, ab, ' | '.join(set_attempts)))
+
     primary_project.save()
     print("DEBUG: Project saved.")
 

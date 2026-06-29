@@ -157,6 +157,36 @@ try:
             "Could not write parameter '%s'. Tried slot.value, slot.set_value, "
             "collection[key]. Last error: %s" % (PARAMETER_NAME, last_err))
 
+    # Read-back verification: assigning to a typed CODESYS parameter slot's
+    # '.value' can be accepted without raising yet silently NOT stick (e.g. a
+    # type-coercion no-op, or a read-only/locked override) -- the recurring
+    # "lying success" failure mode. Re-read the slot and compare to what we
+    # wrote; FAIL LOUDLY on mismatch so the caller doesn't trust an override
+    # that never took (only discovered later on the running PLC otherwise).
+    readback = None
+    readback_err = None
+    try:
+        rv = getattr(target_slot, 'value', None)
+        readback = _to_unicode(unicode(rv)) if rv is not None else None
+    except Exception as re_err:
+        readback_err = str(re_err)
+    if readback is not None:
+        want = _to_unicode(unicode(PARAMETER_VALUE_U)).strip()
+        got = readback.strip()
+        if got != want:
+            print("SCRIPT_ERROR_CODE: ERR_WRITE_DID_NOT_STICK")
+            raise RuntimeError(
+                "Parameter '%s' write did not stick: wrote %r but read back %r "
+                "(accessor: %s). The scripting API accepted the assignment but it "
+                "had no effect -- the slot may be a different type or locked." % (
+                    PARAMETER_NAME, want, got, accessor_used))
+    else:
+        # Couldn't read back -- can't confirm. Surface as a warning, not a hard
+        # fail (some slots are write-only / not re-readable), so the caller
+        # knows the value is unverified.
+        print("WARN: could not read back parameter '%s' to verify the write%s" % (
+            PARAMETER_NAME, (": %s" % readback_err) if readback_err else ""))
+
     # Save so the override persists.
     try:
         primary_project.save()
@@ -167,6 +197,7 @@ try:
         u'library': _to_unicode(LIBRARY_NAME),
         u'parameter': _to_unicode(PARAMETER_NAME),
         u'newValue': _to_unicode(PARAMETER_VALUE),
+        u'valueReadback': readback,
         u'accessorUsed': _to_unicode(accessor_used),
     })
     print("SCRIPT_SUCCESS: Library parameter override set.")

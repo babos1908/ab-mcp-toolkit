@@ -133,6 +133,22 @@ try:
                 pass
             break
 
+    # Read-back verification: the version write can be accepted without raising
+    # yet not stick ("lying success"). Compare the re-read version to what we
+    # requested and FAIL LOUDLY on mismatch. Carve-out: '*' (latest/floating)
+    # legitimately resolves to a concrete version string, so an exact compare
+    # would false-positive -- only verify when an exact version was requested.
+    req = (NEW_VERSION or '').strip()
+    if req and req != '*' and new_resolved is not None:
+        got = _to_unicode(unicode(new_resolved)).strip()
+        if got != req:
+            print("SCRIPT_ERROR_CODE: ERR_WRITE_DID_NOT_STICK")
+            raise RuntimeError(
+                "Library reference '%s' version did not stick: requested %r but "
+                "reference now resolves to %r (set via %s). The scripting API "
+                "accepted the change but it had no effect." % (
+                    LIBRARY_NAME, req, got, set_via))
+
     try:
         primary_project.save()
     except Exception as save_err:

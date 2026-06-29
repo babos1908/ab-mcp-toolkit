@@ -30,6 +30,22 @@ try:
     else:
         raise TypeError("Object '%s' of type %s does not support set_name() or rename()." % (old_name, target_type))
 
+    # Read-back verification: set_name/rename can be accepted without raising
+    # yet land a DIFFERENT name than requested (CODESYS may sanitize/normalize
+    # an illegal identifier, or silently no-op on a collision) -- the "lying
+    # success" failure mode. Re-read the name and fail loudly on mismatch.
+    actual_name = None
+    try:
+        actual_name = getattr(target_object, 'get_name', lambda: None)()
+    except Exception:
+        pass
+    if actual_name is not None and unicode(actual_name).strip() != NEW_NAME.strip():
+        print("SCRIPT_ERROR_CODE: ERR_RENAME_DID_NOT_STICK")
+        raise RuntimeError(
+            "Rename did not stick: requested '%s' but object is now named '%s' "
+            "(was '%s'). CODESYS may have rejected/normalized the name or hit a "
+            "collision." % (NEW_NAME, actual_name, old_name))
+
     try:
         print("DEBUG: Saving Project...")
         primary_project.save()
