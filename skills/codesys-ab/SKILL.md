@@ -114,16 +114,22 @@ Una sola volta per sessione (o dopo `shutdown_codesys`). Serve all'utente per ve
 - `set_device_parameter(projectFilePath, devicePath, parameterName, value)`.
 - `map_io_channel(projectFilePath, channelPath, variableName, ...)`.
 
-### Online / runtime — ⚠️ INHERENT LIMIT su AB 2.9 SP19 (Premium INCLUSO)
+### Online / runtime — ⚠️ FIX PORTATO 2026-06-29, NON ANCORA VERIFICATO su questa build
 
-**Confermato empiricamente 2026-05-27 (Standard) E 2026-05-30 (Premium, attach mode)**: i tool online-side **NON funzionano via scripting su AB 2.9 SP19, indipendentemente dall'edition**. La `OnlineManager` (`se.online`) espone **un solo metodo**: `create_online_application`, che fallisce con `RuntimeError: Stack empty.` perché lo stack di selezione dell'IDE non è popolato da un contesto script. **Nessun** accessor alternativo esiste: `target_app` ha solo `create_call/get_call/is_active_application/set_active_application` (niente `online_application`), il device node `PLC_AC500_V3` non ha attr online, `se.online` non ha metodi reuse/observe. Quindi riusare una sessione UI Login è impossibile. Tutti questi tool falliscono con `ERR_ONLINE_STACK_EMPTY`:
+**Storico (confermato empiricamente più volte, Standard E Premium, attach mode incluso)**: gli online ops via scripting davano SEMPRE `Stack empty` da `se.online.create_online_application`, edition-independent, nessun accessor di riuso sessione UI. La `OnlineManager` (`se.online`) esponeva **un solo metodo**: `create_online_application`, che falliva con `RuntimeError: Stack empty.` perché lo stack di selezione dell'IDE non è popolato da un contesto script. **Nessun** accessor alternativo esisteva: `target_app` ha solo `create_call/get_call/is_active_application/set_active_application` (niente `online_application`), il device node `PLC_AC500_V3` non ha attr online, `se.online` non ha metodi reuse/observe. Quindi riusare una sessione UI Login era impossibile. Tutti questi tool fallivano con `ERR_ONLINE_STACK_EMPTY`: `connect_to_device`, `get_application_state`, `read_variable`, `write_variable`, `monitor_variables`, `download_to_device`, `start_stop_application`, `disconnect_from_device`.
 
-- `connect_to_device(projectFilePath, devicePath, ipAddress?, gatewayName?)` — gateway resolver patch presente, ma il successivo create_online_application sbatte sullo Stack empty
-- `get_application_state`, `read_variable`, `write_variable`, `monitor_variables`
-- `download_to_device`, `start_stop_application`
-- `disconnect_from_device`
+**Novità 2026-06-29**: trovato un fix indipendente su `luke-harriman/Codesys-MCP` (commit `a063aad`) con **la stessa diagnosi di causa** che avevamo scritto noi (stack IDE-interno popolato solo dal dispatcher comandi IDE, bypassato dalle chiamate IPC) — due progetti diversi, stessa scoperta. Il fix: reflection sul campo privato `_executor` di `se.online` per invocare `ExecuteSource()`, che fa scattare l'evento giusto. **Portato in questo fork** (`with_executor()` in `ensure_online_connection.py`, applicato a tutti i tool online). Verificato da upstream su **CODESYS V3 SP16, hardware ifm** — non ancora su AB 2.9/SP19/AC500.
 
-**Workaround consigliato per AB 2.9 Standard (mixed-mode)**:
+- Se la reflection fallisce su questa build → degrada a chiamata diretta = comportamento identico allo storico sopra (stesso errore `ERR_ONLINE_STACK_EMPTY`). Il porting non può peggiorare nulla.
+- Se la reflection funziona → i tool online potrebbero funzionare per la prima volta su AB 2.9/SP19. Da verificare su PLC reale prima di fidarsi.
+
+**Tool interessati** (tutti passano da `with_executor`, esito da confermare su questa build):
+`connect_to_device`, `get_application_state`, `read_variable`, `write_variable` (ora usa `set_prepared_value`+`force_prepared_values`, non più `write_value`), `monitor_variables`, `download_to_device`, `start_stop_application`. (`disconnect_from_device` non toccato — resta limite noto.)
+
+**Se testi e funziona**: aggiorna questa sezione, il workaround mixed-mode sotto diventa opzionale invece che obbligatorio.
+**Se testi e NON funziona**: il comportamento è identico allo storico, nessuna sorpresa — usa il workaround.
+
+**Workaround consigliato per AB 2.9 Standard (mixed-mode, ancora valido finché non verificato)**:
 - **MCP**: project prep + compile + library release (`set_pou_code`, `compile_project`, `release_library_version`, `install_library_to_repository`, ecc.) — questi funzionano perfettamente
 - **AB UI**: Online → Login + Download + Watch panel per runtime observation/control
 - **Out-of-band**: per smoke testing automatizzato, parla con il PLC tramite il suo protocollo applicativo (MQTT broker, OPC UA server, HTTP API del controller, ecc.) invece che via scripting MCP
@@ -131,7 +137,7 @@ Una sola volta per sessione (o dopo `shutdown_codesys`). Serve all'utente per ve
 **Tool ancora utili anche su Standard**:
 - `set_credentials`, `set_simulation_mode` — settano valori nel progetto, non richiedono online session
 
-**Su AB Premium — CONFERMATO IDENTICO A STANDARD (2026-05-30)**: testato empiricamente in attach mode (watcher dentro il contesto scripting della GUI, dopo Online→Login in simulazione). Risultato: `create_online_application` → `Stack empty`, zero accessor `online_application` su qualsiasi host. **Tools → Scripting → Execute Script File NON popola lo stack online** — l'ipotesi precedente era sbagliata. La scripting API di CODESYS V3.5 SP19 non supporta online ops da script, punto. Premium NON cambia nulla qui. (Su CODESYS V4 / AB 3.x con scripting Python 3 nativo potrebbe cambiare — non verificato.)
+**Su AB Premium — storico identico a Standard (confermato 2026-05-30)**: testato empiricamente in attach mode (watcher dentro il contesto scripting della GUI, dopo Online→Login in simulazione). Risultato storico: `create_online_application` → `Stack empty`, zero accessor `online_application` su qualsiasi host. `Tools → Scripting → Execute Script File` non popola lo stack online. Il fix 2026-06-29 sopra è la prima pista concreta per superare questo limite su Premium/Standard entrambi — da verificare.
 
 > **Nota attach mode (fix 2026-05-30)**: attach_codesys aveva un bug che uccideva la sessione attached entro ~5s (l'health monitor controllava un PID che in attach mode è `null` by design → falso "process died"). Corretto con un flag `attached` che salta il check PID-based (in attach mode la liveness è data solo dall'heartbeat). Attach mode ora è stabile e utile per pilotare i **tool offline** dentro una GUI che gestisci tu (zero lock conflict con altre istanze AB). Non sblocca però gli online ops — quelli restano impossibili come sopra.
 
