@@ -5,7 +5,7 @@ LIBRARY_NAME = "{LIBRARY_NAME}"
 try:
     print("DEBUG: add_library script: Library='%s', Project='%s'" % (LIBRARY_NAME, PROJECT_FILE_PATH))
     primary_project = ensure_project_open(PROJECT_FILE_PATH)
-    if not LIBRARY_NAME: raise ValueError("Library name empty.")
+    if not LIBRARY_NAME: print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT"); raise ValueError("Library name empty.")
 
     project_name = os.path.basename(PROJECT_FILE_PATH)
     lib_manager = None
@@ -32,6 +32,7 @@ try:
             print("DEBUG: Children search for Library Manager failed: %s" % e)
 
     if not lib_manager:
+        print("SCRIPT_ERROR_CODE: ERR_OBJECT_NOT_FOUND")
         raise RuntimeError("Library Manager not found in project '%s'." % project_name)
 
     print("DEBUG: Library Manager found: %s" % getattr(lib_manager, 'get_name', lambda: '?')())
@@ -61,6 +62,7 @@ try:
 
     if not added:
         if last_real_error is not None:
+            print("SCRIPT_ERROR_CODE: ERR_LIB_NOT_FOUND")
             raise RuntimeError(
                 "Library Manager.%s('%s') failed: %s. The library is likely "
                 "not installed in the CODESYS library repository, or the name "
@@ -68,6 +70,7 @@ try:
                 "'Standard, * (System)' or 'Util, 3.5.16.0 (3S - Smart Software Solutions GmbH)')." % (
                     last_real_error[0], LIBRARY_NAME, last_real_error[1])
             )
+        print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
         raise RuntimeError(
             "Could not add library '%s'. Library Manager does not expose "
             "any known add method (tried add_library, insert_library, "
@@ -82,6 +85,7 @@ try:
         print("ERROR: Failed to save Project after adding library: %s" % save_err)
         detailed_error = traceback.format_exc()
         error_message = "Error saving Project after adding library '%s': %s\n%s" % (LIBRARY_NAME, save_err, detailed_error)
+        print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
         print(error_message); print("SCRIPT_ERROR: %s" % error_message); sys.exit(1)
 
     print("Library Added: %s" % LIBRARY_NAME)

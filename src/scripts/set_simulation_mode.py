@@ -53,6 +53,7 @@ try:
             print("DEBUG: project.find('Device') failed: %s" % e)
 
     if target is None:
+        print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
         raise RuntimeError("No object with set_simulation_mode found. Project has no Device descriptor or none expose simulation_mode.")
 
     device = target['obj']

@@ -6,7 +6,7 @@ VARIABLE_VALUE = "{VARIABLE_VALUE}"
 try:
     print("DEBUG: write_variable script: Variable='%s', Value='%s', Project='%s'" % (VARIABLE_PATH, VARIABLE_VALUE, PROJECT_FILE_PATH))
     primary_project = ensure_project_open(PROJECT_FILE_PATH)
-    if not VARIABLE_PATH: raise ValueError("Variable path empty.")
+    if not VARIABLE_PATH: print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT"); raise ValueError("Variable path empty.")
 
     online_app, target_app = ensure_online_connection(primary_project)
     app_name = getattr(target_app, 'get_name', lambda: "Unknown")()
@@ -18,6 +18,7 @@ try:
             print("DEBUG: write_value succeeded.")
         except Exception as e:
             print("DEBUG: write_value failed: %s" % e)
+            print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
             raise
 
     elif hasattr(online_app, 'write'):
@@ -26,9 +27,11 @@ try:
             print("DEBUG: write succeeded.")
         except Exception as e:
             print("DEBUG: write failed: %s" % e)
+            print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
             raise
 
     else:
+        print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
         raise TypeError("Online application does not support write_value() or write().")
 
     print("Variable: %s" % VARIABLE_PATH)

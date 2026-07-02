@@ -19,6 +19,7 @@ try:
             primary_project.save()
             print("DEBUG: primary_project.save() succeeded before install.")
     except Exception as save_err:
+        print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
         raise RuntimeError("Failed to save project before install: %s" % save_err)
 
     # --- Locate the library manager ---
@@ -36,6 +37,7 @@ try:
                 pass
 
     if lib_mgr is None:
+        print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
         raise RuntimeError(
             "Could not locate library manager on script_engine (tried "
             "librarymanager and library_manager). The CODESYS Scripting API "
@@ -244,6 +246,7 @@ try:
             mgr_dir = [a for a in dir(lib_mgr) if not a.startswith('_')]
         except Exception:
             mgr_dir = ['<dir() failed>']
+        print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
         raise RuntimeError(
             "Could not install library '%s'. Attempt log:\n  %s\n"
             "Manager (%s) probed methods present: %s\n"

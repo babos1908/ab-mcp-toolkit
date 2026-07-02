@@ -1,0 +1,50 @@
+feat(robustness): multi-instance owner-guard, content read-back, error-code sweep, tooling
+
+High-impact hardening pass (power/effort unconstrained, ordered by impact).
+
+Multi-instance owner-guard (shared-machine safety) -- launcher.ts, server.ts:
+  Several agents drive their own AB on one box. adoptExisting() previously took
+  the newest-live session and could grab ANOTHER agent's AB (observed). Now
+  adoptExisting(preferredProjectPath) live-probes each candidate for its OPEN
+  project and only adopts one matching that project (or empty) -- never one
+  running a different project. New list_ab_sessions tool shows every live AB
+  (pid, heartbeat age, open project, isMine). launch_codesys gained an optional
+  projectFilePath to arm the guard. The live-probe also subsumes the earlier
+  stale-dir fix (a dir that doesn't answer is skipped).
+
+set_pou_code / create_gvl content read-back -- catches "lying success" AND
+content corruption in transit: after replace(), the section text is read back
+and the call FAILS (ERR_WRITE_DID_NOT_STICK) on mismatch or embedded NUL. The
+2026-05-27 Unicode->NUL bug (non-ASCII comment chars persisted as NUL,
+swallowing struct fields) would have been caught instantly here instead of as
+56 downstream compile errors. A requested section that could not be
+written+verified now hard-fails instead of a false SCRIPT_SUCCESS.
+
+Error-code sweep across all scripts (delegated audit, verified) -- types.ts +
+~40 scripts: added the 4 missing enum codes (ERR_WRITE/RESET/RENAME_DID_NOT_STICK,
+ERR_SA_NOT_AVAILABLE) and 168 SCRIPT_ERROR_CODE markers on previously-uncoded
+failure paths so agents branch on codes, not prose. Careful with
+extractErrorCode's lastIndexOf semantics: ERR_UNKNOWN was deliberately NOT
+added to catch-all excepts that can receive an already-coded exception (it
+would clobber the specific code); only the two scripts with no coded upstream
+path got a catch-all code. All 67 scripts parse; build clean.
+
+get_server_log tool -- returns the tail of --log-file (lifecycle markers) so
+agents self-diagnose AB lifecycle without hunting for files on disk.
+
+Auto tool-catalog -- npm run build regenerates docs/TOOL-CATALOG.md from the
+tool registrations in server.ts (scripts/gen-tool-catalog.js), so the catalog
+can never drift stale from the real 74-tool set.
+
+Skill (private) -- added a "Premium day-1" block: what unlocks tomorrow
+(attach_codesys becomes viable; run_static_analysis with a configured rule set)
+and what stays dead (online ops via scripting -- edition-independent, do not
+re-probe).
+
+All changes are server-side or template-side; the running server is unaffected
+until restart, so a live agent session cannot be disturbed. Not runtime-tested
+against AB (instance in use by another agent); logic is deterministic and
+syntax/build-verified.
+
+Co-authored-by: setter-audit subagent (Claude) <noreply@anthropic.com>
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>

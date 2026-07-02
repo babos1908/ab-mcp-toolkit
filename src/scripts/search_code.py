@@ -21,6 +21,7 @@ try:
           (PATTERN, USE_REGEX, CASE_SENSITIVE, INCLUDE_DECL, INCLUDE_IMPL, MAX_HITS_STR))
     primary_project = ensure_project_open(PROJECT_FILE_PATH)
     if not PATTERN:
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise ValueError("Search pattern empty.")
 
     use_regex = (USE_REGEX == "1")
@@ -32,6 +33,7 @@ try:
     try:
         rx = _compile_pattern(PATTERN, use_regex, case_sensitive)
     except re.error as rx_err:
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise ValueError("Invalid regex '%s': %s" % (PATTERN, rx_err))
 
     hits = []

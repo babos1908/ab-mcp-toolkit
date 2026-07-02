@@ -56,6 +56,7 @@ try:
         except Exception as find_err:
             print("WARN: application search failed: %s" % find_err)
     if not target_app:
+        print("SCRIPT_ERROR_CODE: ERR_OBJECT_NOT_FOUND")
         raise RuntimeError(
             "No application found in project '%s'. Static Analysis runs against "
             "an Application node; open the project and set an active application." % project_name)

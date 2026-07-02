@@ -12,8 +12,10 @@ try:
     try:
         variable_paths = json.loads(VARIABLES_JSON)
     except Exception as parse_err:
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise ValueError("Could not parse VARIABLES_JSON ('%s'): %s" % (VARIABLES_JSON, parse_err))
     if not isinstance(variable_paths, list) or not variable_paths:
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise ValueError("variablePaths must be a non-empty array.")
 
     duration_ms = int(DURATION_MS_STR)
@@ -40,6 +42,7 @@ try:
         read_fn = online_app.read
         is_value_object = False
     else:
+        print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
         raise TypeError("Online application does not support read_value() or read().")
 
     samples = []

@@ -55,6 +55,7 @@ try:
             pass
 
     if info is None:
+        print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
         raise RuntimeError(
             "Project Information node not accessible via ScriptEngine on this build."
         )

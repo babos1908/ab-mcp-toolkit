@@ -81,7 +81,91 @@ export class CodesysLauncher implements ScriptExecutor {
    * session. The AB PID is recovered from ready.signal so health monitoring
    * (process-died detection) keeps working after adoption.
    */
-  async adoptExisting(): Promise<boolean> {
+  /**
+   * Live-probe a session dir's watcher: send a no-op that also reports the
+   * currently-open primary project path, and require a real reply within a
+   * short window. Returns { alive, projectPath }. Used both by adoptExisting
+   * (to reject stale dirs and to check project ownership) and by
+   * listLiveSessions (diagnostics). Uses a short-lived throwaway IpcClient so
+   * it never disturbs this launcher's own binding.
+   */
+  private async probeSession(sessionDir: string, timeoutMs: number): Promise<{ alive: boolean; projectPath: string | null }> {
+    const probe = new IpcClient({ baseDir: sessionDir, ...DEFAULT_IPC_CONFIG, commandTimeoutMs: timeoutMs });
+    try {
+      await probe.ensureDirectories();
+      const res = await probe.sendCommand(
+        'import sys\n' +
+        'try:\n' +
+        '    import scriptengine as se\n' +
+        '    _p = se.projects.primary\n' +
+        '    _pp = None\n' +
+        '    try: _pp = _p.path if _p is not None else None\n' +
+        '    except Exception: _pp = None\n' +
+        '    print("ADOPT_PROBE_PROJECT: " + (str(_pp) if _pp else "(none)"))\n' +
+        'except Exception as _e:\n' +
+        '    print("ADOPT_PROBE_PROJECT: (none)")\n' +
+        'print("ADOPT_PROBE_OK")\n' +
+        'print("SCRIPT_SUCCESS")\n' +
+        'sys.exit(0)\n',
+        timeoutMs
+      );
+      const out = res.output || '';
+      const alive = res.success || out.includes('ADOPT_PROBE_OK');
+      let projectPath: string | null = null;
+      const m = out.match(/ADOPT_PROBE_PROJECT:\s*(.+)/);
+      if (m) {
+        const p = m[1].trim();
+        projectPath = (p && p !== '(none)') ? p : null;
+      }
+      return { alive, projectPath };
+    } catch {
+      return { alive: false, projectPath: null };
+    }
+  }
+
+  /**
+   * Enumerate every live watcher session on this machine (fresh heartbeat +
+   * alive PID), reporting each one's open project. Read-only; safe to call
+   * anytime. This is how the multi-instance story stays sane on a shared box:
+   * you can SEE which AB owns which project before launching/adopting.
+   */
+  async listLiveSessions(): Promise<Array<{ sessionId: string; pid: number | null; heartbeatAgeS: number; projectPath: string | null; isMine: boolean }>> {
+    const baseDir = path.join(os.tmpdir(), SESSION_DIR_PREFIX);
+    let entries: string[] = [];
+    try { entries = fs.readdirSync(baseDir); } catch { return []; }
+    const nowMs = Date.now();
+    const out: Array<{ sessionId: string; pid: number | null; heartbeatAgeS: number; projectPath: string | null; isMine: boolean }> = [];
+    for (const guid of entries) {
+      const sessionDir = path.join(baseDir, guid);
+      try {
+        const stat = fs.statSync(path.join(sessionDir, 'heartbeat.signal'));
+        const ageMs = nowMs - stat.mtimeMs;
+        if (ageMs > ADOPT_MAX_HEARTBEAT_AGE_S * 1000) continue;
+        let pid: number | null = null;
+        try {
+          const info = JSON.parse(fs.readFileSync(path.join(sessionDir, 'ready.signal'), 'utf-8'));
+          if (typeof info.pid === 'number') pid = info.pid;
+        } catch { /* ignore */ }
+        if (pid !== null && isPidAlive(pid) === false) continue;
+        const { projectPath } = await this.probeSession(sessionDir, 3000);
+        out.push({ sessionId: guid, pid, heartbeatAgeS: ageMs / 1000, projectPath, isMine: guid === this.sessionId });
+      } catch { continue; }
+    }
+    return out;
+  }
+
+  /**
+   * Try to adopt a still-running watcher instead of cold-launching.
+   *
+   * @param preferredProjectPath when set, ONLY adopt a session that already
+   *   has this exact project open (case-insensitive path match), or one with
+   *   no project open at all. This is the multi-instance owner-guard: on a
+   *   shared machine with several agents, it prevents grabbing another agent's
+   *   AB that has a DIFFERENT project open (which would then contend on locks /
+   *   switch their project out from under them). When undefined, falls back to
+   *   the newest-live behaviour (single-agent case).
+   */
+  async adoptExisting(preferredProjectPath?: string): Promise<boolean> {
     if (this.state === 'ready' || this.state === 'launching') return false;
     const baseDir = path.join(os.tmpdir(), SESSION_DIR_PREFIX);
     let entries: string[] = [];
@@ -118,12 +202,42 @@ export class CodesysLauncher implements ScriptExecutor {
     }
     if (candidates.length === 0) return false;
 
-    // Newest heartbeat wins.
+    // Newest heartbeat first.
     candidates.sort((a, b) => a.ageMs - b.ageMs);
-    const chosen = candidates[0];
+
+    // Owner-guard: when a preferred project is given, live-probe candidates in
+    // freshness order and adopt the FIRST one whose open project matches (or
+    // that has nothing open yet). Never adopt a session running a DIFFERENT
+    // project -- that belongs to another agent. Without a preferred project we
+    // keep the newest-live behaviour but still verify it answers.
+    const wantProj = preferredProjectPath ? path.resolve(preferredProjectPath).toLowerCase() : null;
+    let chosen: Candidate | null = null;
+    let chosenProject: string | null = null;
+    for (const cand of candidates) {
+      const { alive, projectPath } = await this.probeSession(cand.dir, 4000);
+      if (!alive) {
+        launcherLog.warn(`adoptExisting(): ${path.basename(cand.dir)} did not answer a live probe; skipping (stale dir).`);
+        continue;
+      }
+      if (wantProj !== null) {
+        const hasProj = projectPath ? path.resolve(projectPath).toLowerCase() : null;
+        if (hasProj !== null && hasProj !== wantProj) {
+          launcherLog.info(`adoptExisting(): ${path.basename(cand.dir)} owns a different project (${projectPath}); not adopting (owner-guard).`);
+          continue; // belongs to another agent / different project
+        }
+      }
+      chosen = cand;
+      chosenProject = projectPath;
+      break;
+    }
+    if (chosen === null) {
+      launcherLog.info('adoptExisting(): no adoptable session matched (owner-guard / all stale); will cold-start.');
+      return false;
+    }
+
     launcherLog.info(
-      `adoptExisting(): found live watcher at ${chosen.dir} ` +
-      `(heartbeat ${(chosen.ageMs / 1000).toFixed(1)}s old, pid=${chosen.pid ?? 'unknown'}); re-attaching.`
+      `adoptExisting(): adopting live watcher at ${chosen.dir} ` +
+      `(heartbeat ${(chosen.ageMs / 1000).toFixed(1)}s old, pid=${chosen.pid ?? 'unknown'}, project=${chosenProject ?? '(none)'}).`
     );
 
     this.setState('launching');
@@ -140,35 +254,6 @@ export class CodesysLauncher implements ScriptExecutor {
       ...(this.config.commandTimeoutMs ? { commandTimeoutMs: this.config.commandTimeoutMs } : {}),
     });
     await this.ipcClient.ensureDirectories();
-
-    // Confirm the watcher is REALLY there. ready.signal being present is not
-    // enough: a stale dir from a crashed/exited session (or a GUI the user
-    // launched by hand and is closing) leaves the file behind while nothing
-    // is actually polling commands. Adopting such a dir was reported as
-    // "launched successfully" followed by a permanent 'launching'/PID:N/A
-    // stall (DKIT 2026-06-29). So we send a trivial no-op command and require
-    // a real reply within a short window; only a genuinely live watcher
-    // answers. On no answer we abandon adoption and let the caller cold-start.
-    const liveProbeMs = 4000;
-    let probedAlive = false;
-    try {
-      const res = await this.ipcClient.sendCommand(
-        'import sys\nprint("ADOPT_PROBE_OK")\nprint("SCRIPT_SUCCESS")\nsys.exit(0)\n',
-        liveProbeMs
-      );
-      probedAlive = res.success || (res.output || '').includes('ADOPT_PROBE_OK');
-    } catch (probeErr) {
-      launcherLog.warn(`adoptExisting(): live probe got no reply (${probeErr}); the session dir is stale.`);
-    }
-    if (!probedAlive) {
-      launcherLog.warn('adoptExisting(): chosen session did not answer a live probe; abandoning adoption (will cold-start).');
-      this.ipcClient = null;
-      this.pid = null;
-      this.ipcDir = null;
-      this.sessionId = null;
-      this.setState('stopped');
-      return false;
-    }
 
     this.startedAt = Date.now();
     this.lastError = null;

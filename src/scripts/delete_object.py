@@ -5,11 +5,12 @@ OBJECT_PATH = "{OBJECT_PATH}"
 try:
     print("DEBUG: delete_object script: ObjectPath='%s', Project='%s'" % (OBJECT_PATH, PROJECT_FILE_PATH))
     primary_project = ensure_project_open(PROJECT_FILE_PATH)
-    if not OBJECT_PATH: raise ValueError("Object path empty.")
+    if not OBJECT_PATH: print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT"); raise ValueError("Object path empty.")
 
     # Find the target object
     target_object = find_object_by_path_robust(primary_project, OBJECT_PATH, "target object")
     if not target_object:
+        print("SCRIPT_ERROR_CODE: ERR_OBJECT_NOT_FOUND")
         raise ValueError("Object not found at path: %s" % OBJECT_PATH)
 
     target_name = getattr(target_object, 'get_name', lambda: OBJECT_PATH)()
@@ -26,6 +27,7 @@ try:
         target_object.delete()
         print("DEBUG: Object deleted.")
     else:
+        print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
         raise TypeError("Object '%s' of type %s does not support remove() or delete()." % (target_name, target_type))
 
     try:
@@ -36,6 +38,7 @@ try:
         print("ERROR: Failed to save Project after deleting object: %s" % save_err)
         detailed_error = traceback.format_exc()
         error_message = "Error saving Project after deleting '%s': %s\n%s" % (target_name, save_err, detailed_error)
+        print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
         print(error_message); print("SCRIPT_ERROR: %s" % error_message); sys.exit(1)
 
     print("Object Deleted: %s" % target_name)

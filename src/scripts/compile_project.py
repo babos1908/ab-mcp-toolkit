@@ -138,6 +138,7 @@ try:
                 print("DEBUG: Library project detected (ext=%s, marker=%s); will use Check-all-Pool-Objects path."
                       % (is_library_ext, has_lib_marker))
             else:
+                print("SCRIPT_ERROR_CODE: ERR_OBJECT_NOT_FOUND")
                 raise RuntimeError(
                     "No compilable target found in project '%s' (no Application node and not a .library file)." % project_name
                 )
@@ -350,6 +351,7 @@ try:
                 print("WARN: pool-object iteration failed: %s" % iter_err)
 
     if not build_invoked:
+        print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
         raise TypeError(
             "Target '%s' (kind=%s) supports no known compile entry point." % (app_name, project_kind)
         )

@@ -18,4 +18,5 @@ except Exception as e:
     error_message = "Error during status check: %s" % e
     print(error_message); print("Scripting OK: False")
     # traceback.print_exc() # Optional traceback
+    print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
     print("SCRIPT_ERROR: %s" % error_message); sys.exit(1)

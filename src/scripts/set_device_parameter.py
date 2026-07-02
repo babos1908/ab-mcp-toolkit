@@ -9,12 +9,15 @@ try:
           (DEVICE_PATH, PARAMETER_ID_STR, VALUE))
     primary_project = ensure_project_open(PROJECT_FILE_PATH)
     if not DEVICE_PATH:
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise ValueError("Device path empty.")
     if not PARAMETER_ID_STR:
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise ValueError("Parameter id empty.")
 
     device = find_object_by_path_robust(primary_project, DEVICE_PATH, "device")
     if device is None:
+        print("SCRIPT_ERROR_CODE: ERR_OBJECT_NOT_FOUND")
         raise ValueError("Device not found at path: %s" % DEVICE_PATH)
 
     # Resolve parameter_id - accept numeric IDs (most common in CODESYS
@@ -69,6 +72,7 @@ try:
             set_attempts.append("parameters[id]= failed: %s" % e)
 
     if not success:
+        print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
         raise RuntimeError(
             "Could not write device parameter via any known API. Tried: %s. "
             "Last error: %s. Some EtherNet/IP and PROFINET adapter parameters "

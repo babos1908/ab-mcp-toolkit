@@ -5,10 +5,11 @@ APP_ACTION = "{APP_ACTION}"
 try:
     print("DEBUG: start_stop_application script: Action='%s', Project='%s'" % (APP_ACTION, PROJECT_FILE_PATH))
     primary_project = ensure_project_open(PROJECT_FILE_PATH)
-    if not APP_ACTION: raise ValueError("Action empty.")
+    if not APP_ACTION: print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT"); raise ValueError("Action empty.")
 
     action_lower = APP_ACTION.lower()
     if action_lower not in ('start', 'stop'):
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise ValueError("Invalid action '%s'. Must be 'start' or 'stop'." % APP_ACTION)
 
     online_app, target_app = ensure_online_connection(primary_project)
@@ -20,6 +21,7 @@ try:
             online_app.start()
             print("DEBUG: Application started.")
         else:
+            print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
             raise TypeError("Online application does not support start().")
     else:
         if hasattr(online_app, 'stop'):
@@ -27,6 +29,7 @@ try:
             online_app.stop()
             print("DEBUG: Application stopped.")
         else:
+            print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
             raise TypeError("Online application does not support stop().")
 
     # Get state after action

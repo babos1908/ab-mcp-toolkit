@@ -97,11 +97,13 @@ try:
             last_err = "1-arg form: %s: %s" % (type(e).__name__, e)
 
     if not created:
+        print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
         raise RuntimeError(
             "create_boot_application failed for '%s'. Last error: %s" % (app_name, last_err))
 
     # --- Verify the artifact was written ---
     if not os.path.exists(OUTPUT_APP_PATH):
+        print("SCRIPT_ERROR_CODE: ERR_WRITE_DID_NOT_STICK")
         raise RuntimeError(
             "create_boot_application reported success but output file does not "
             "exist: %s" % OUTPUT_APP_PATH)

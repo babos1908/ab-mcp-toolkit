@@ -204,6 +204,7 @@ try:
                     device = child
                     break
             if device is None:
+                print("SCRIPT_ERROR_CODE: ERR_OBJECT_NOT_FOUND")
                 raise RuntimeError(
                     "No device in the project supports set_gateway_and_address."
                 )
@@ -221,6 +222,7 @@ try:
                     print("DEBUG: set_gateway_and_address(GUID) raised %s; retrying with name '%s'" % (err_text, gw_input))
                     device.set_gateway_and_address(gw_input, IP_ADDRESS)
                 else:
+                    print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
                     raise
 
     # Gap 9: try to prime the online-context stack BEFORE the first call to

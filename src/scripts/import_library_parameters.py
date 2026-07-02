@@ -22,10 +22,12 @@ try:
     try:
         data = json.loads(raw.decode('utf-8') if isinstance(raw, bytes) else raw)
     except Exception as je:
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise RuntimeError("Failed to parse JSON: %s" % je)
 
     libs_to_apply = data.get(u'libraries', [])
     if not isinstance(libs_to_apply, list):
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise RuntimeError("'libraries' key in input is not a list.")
 
     primary_project = ensure_project_open(PROJECT_FILE_PATH)

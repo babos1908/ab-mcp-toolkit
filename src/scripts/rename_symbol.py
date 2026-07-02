@@ -29,12 +29,16 @@ try:
           (OLD_NAME, NEW_NAME, DRY_RUN, INCLUDE_DECL, INCLUDE_IMPL))
     primary_project = ensure_project_open(PROJECT_FILE_PATH)
     if not OLD_NAME:
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise ValueError("oldName is required.")
     if not NEW_NAME:
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise ValueError("newName is required.")
     if OLD_NAME == NEW_NAME:
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise ValueError("oldName and newName are identical; nothing to do.")
     if NEW_NAME.upper() in IEC_KEYWORDS:
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise ValueError(
             "newName '%s' is an IEC 61131-3 reserved keyword. Renaming to a "
             "keyword would produce an uncompilable project." % NEW_NAME
@@ -43,6 +47,7 @@ try:
     # or underscore, contain only [A-Za-z0-9_]. CODESYS will reject worse
     # things later but a clear error here is friendlier.
     if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', NEW_NAME):
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise ValueError(
             "newName '%s' is not a valid IEC identifier (must start with letter "
             "or underscore, contain only [A-Za-z0-9_])." % NEW_NAME
@@ -115,6 +120,7 @@ try:
         for child in primary_project.get_children(False):
             _walk(child, "")
     except Exception as walk_err:
+        print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
         raise RuntimeError("Traversal failed before any writes: %s" % walk_err)
 
     total_matches = sum(p['match_count'] for p in plan)
@@ -169,6 +175,7 @@ try:
             # reopen the project to discard them.
             failed_path = first_failure[0]['current_path']
             failed_err = first_failure[1]
+            print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
             raise RuntimeError(
                 "Rename failed at section '%s/%s' (%s). %d/%d sections were "
                 "rewritten in memory but the project was NOT saved - reopen "
@@ -182,6 +189,7 @@ try:
             primary_project.save()
             print("DEBUG: Saved.")
         except Exception as save_err:
+            print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
             raise RuntimeError(
                 "All %d sections rewritten in memory but project.save() failed: %s. "
                 "Reopen the project to discard the in-memory changes." %

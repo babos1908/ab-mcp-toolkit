@@ -6,8 +6,8 @@ PARENT_PATH_REL = "{PARENT_PATH}"
 try:
     print("DEBUG: create_folder script: Name='%s', ParentPath='%s', Project='%s'" % (FOLDER_NAME, PARENT_PATH_REL, PROJECT_FILE_PATH))
     primary_project = ensure_project_open(PROJECT_FILE_PATH)
-    if not FOLDER_NAME: raise ValueError("Folder name empty.")
-    if not PARENT_PATH_REL: raise ValueError("Parent path empty.")
+    if not FOLDER_NAME: print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT"); raise ValueError("Folder name empty.")
+    if not PARENT_PATH_REL: print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT"); raise ValueError("Parent path empty.")
 
     # Find parent object (same logic as create_pou)
     if PARENT_PATH_REL == "Application":
@@ -41,6 +41,7 @@ try:
         parent_object = find_object_by_path_robust(primary_project, PARENT_PATH_REL, "parent container")
 
     if not parent_object:
+        print("SCRIPT_ERROR_CODE: ERR_OBJECT_NOT_FOUND")
         raise ValueError("Parent object not found for path: %s" % PARENT_PATH_REL)
 
     parent_name = getattr(parent_object, 'get_name', lambda: str(parent_object))()
@@ -48,6 +49,7 @@ try:
 
     # Create the folder
     if not hasattr(parent_object, 'create_folder'):
+        print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
         raise TypeError("Parent object '%s' of type %s does not support create_folder." % (parent_name, type(parent_object).__name__))
 
     print("DEBUG: Calling create_folder: Name='%s'" % FOLDER_NAME)
@@ -77,6 +79,7 @@ try:
                 "found among parent children. The API may have rejected the "
                 "request silently." % FOLDER_NAME
             )
+            print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
             print(error_message); print("SCRIPT_ERROR: %s" % error_message); sys.exit(1)
         print("DEBUG: Verified folder '%s' exists after create_folder returned None." % FOLDER_NAME)
     else:
@@ -91,6 +94,7 @@ try:
         print("ERROR: Failed to save Project after folder creation: %s" % save_err)
         detailed_error = traceback.format_exc()
         error_message = "Error saving Project after creating folder '%s': %s\n%s" % (FOLDER_NAME, save_err, detailed_error)
+        print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
         print(error_message); print("SCRIPT_ERROR: %s" % error_message); sys.exit(1)
 
     print("Folder Created: %s" % new_folder_name)

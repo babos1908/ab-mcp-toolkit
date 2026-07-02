@@ -135,6 +135,7 @@ try:
                 payload = payload.encode('utf-8')
             f.write(payload)
     except Exception as we:
+        print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
         raise RuntimeError("Failed to write export file: %s" % we)
 
     emit_result({u'outputPath': _to_unicode(OUTPUT_PATH), u'librariesExported': len(export_libs)})

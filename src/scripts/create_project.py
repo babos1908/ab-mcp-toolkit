@@ -6,9 +6,9 @@ try:
     print("DEBUG: Python script create_project (copy from template):")
     print("DEBUG:   Template Source = %s" % TEMPLATE_PROJECT_PATH)
     print("DEBUG:   Target Path = %s" % PROJECT_FILE_PATH)
-    if not PROJECT_FILE_PATH: raise ValueError("Target project file path empty.")
-    if not TEMPLATE_PROJECT_PATH: raise ValueError("Template project file path empty.")
-    if not os.path.exists(TEMPLATE_PROJECT_PATH): raise IOError("Template project file not found: %s" % TEMPLATE_PROJECT_PATH)
+    if not PROJECT_FILE_PATH: print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT"); raise ValueError("Target project file path empty.")
+    if not TEMPLATE_PROJECT_PATH: print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT"); raise ValueError("Template project file path empty.")
+    if not os.path.exists(TEMPLATE_PROJECT_PATH): print("SCRIPT_ERROR_CODE: ERR_PROJECT_NOT_FOUND"); raise IOError("Template project file not found: %s" % TEMPLATE_PROJECT_PATH)
 
     # 1. Copy the template project file to the new location
     target_dir = os.path.dirname(PROJECT_FILE_PATH)
@@ -47,6 +47,7 @@ try:
         sys.exit(0)
     else:
         error_message = "Failed to open project copy %s after copying template %s. projects.open returned None." % (PROJECT_FILE_PATH, TEMPLATE_PROJECT_PATH)
+        print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
         print(error_message); print("SCRIPT_ERROR: %s" % error_message); sys.exit(1)
 except Exception as e:
     detailed_error = traceback.format_exc()

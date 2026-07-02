@@ -17,7 +17,7 @@ import { BackupManager } from './backup-manager';
 import { diffLibraryFiles } from './library-diff';
 import { parseProjectOffline, searchProjectOffline } from './offline-reader';
 import { parseResultJson } from './result-parser';
-import { serverLog, setLogLevel, setLogFile } from './logger';
+import { serverLog, setLogLevel, setLogFile, getLogFile } from './logger';
 
 /** Resolve a file path to an absolute normalized path */
 function resolvePath(filePath: string, workspaceDir: string): string {
@@ -134,6 +134,10 @@ async function fileExists(filePath: string): Promise<boolean> {
  * roughly chronological. Each entry maps a short stable ID to a description.
  */
 const MCP_PATCHES: Array<{ id: string; description: string }> = [
+  { id: 'multi-instance-owner-guard', description: 'Shared-machine safety: adoptExisting(preferredProjectPath) live-probes each candidate session for its OPEN project and only adopts one matching that project (or empty) -- never grabs another agent\'s AB running a different project. New list_ab_sessions tool shows every live AB session (pid, heartbeat age, open project, isMine). launch_codesys gained an optional projectFilePath to enable the guard. 2026-06-29.' },
+  { id: 'set-pou-code-content-readback', description: 'set_pou_code and create_gvl now read back the written text and FAIL (ERR_WRITE_DID_NOT_STICK) on mismatch OR embedded NUL -- catches both silent no-op writes and content corruption in transit (the 2026-05-27 Unicode->NUL bug that swallowed struct fields would have been caught instantly here instead of as 56 downstream compile errors). A requested section that could not be written+verified now hard-fails instead of a lying SCRIPT_SUCCESS.' },
+  { id: 'get-server-log-tool', description: 'New get_server_log tool returns the tail of the --log-file (lifecycle markers: detachKeepAlive/Force-killing/soft-probe/adoption/cause=). Agents self-diagnose AB lifecycle without hunting for files (DKIT could not find the log on disk).' },
+  { id: 'auto-tool-catalog', description: 'npm run build regenerates docs/TOOL-CATALOG.md from the tool registrations in server.ts (scripts/gen-tool-catalog.js) so the catalog can never drift stale from the real tool set.' },
   { id: 'get-object-code-tool', description: 'New get_object_code tool: reads the declaration + implementation of a SINGLE POU/DUT/GVL/Method/Property by path (surgical "read the minimum"), instead of get_all_pou_code dumping the whole project. Wraps the existing get_pou_code script that was previously only reachable as a Resource (agents call tools, not resources). DKIT 2026-06-29 Gap 2; also mitigates the dead offline-XML branch on builds without PLCopen export.' },
   { id: 'adopt-live-probe', description: 'launch_codesys adoption hardened: before adopting an existing session dir, send a no-op command and require a real reply (a stale dir from a crashed/exited watcher, or a hand-launched GUI being closed, leaves ready.signal behind but answers nothing). On no reply, abandon adoption and cold-start. launch_codesys also now verifies the launcher reached state=ready before reporting success, and returns the real state + force_reset_watcher hint otherwise (was: "launched successfully" then permanent launching/PID:N/A stall). DKIT 2026-06-29 Gap 3.' },
   { id: 'export-plcopen-probe-and-attach-edition-hint', description: 'export_project_to_plcopen_xml probes more export method names (export_plcopenxml / export_xml / ExportPLCopenXML / export_native / export) before ERR_API_NOT_EXPOSED, and its error now points at get_object_code/get_all_pou_code as the read path when the build has no PLCopen export. attach_codesys step-1 message now leads with the PREMIUM-only requirement (Execute Script File menu is absent on Standard). DKIT 2026-06-29 Gap 1 + Gap 4.' },
@@ -329,8 +333,11 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   s.tool(
     'launch_codesys',
-    'Manually launch CODESYS with UI. Use when --no-auto-launch was set. If a still-running AB from a previous keep-alive session is detected, this adopts it (no cold start) instead of spawning a second instance.',
-    async () => {
+    "Manually launch CODESYS with UI. Use when --no-auto-launch was set. If a still-running AB from a previous keep-alive session is detected, this adopts it (no cold start) instead of spawning a second instance. On a SHARED machine with several agents, pass projectFilePath: adoption then only re-attaches to an AB that already has THAT project open (or none), never another agent's AB running a different project -- see list_ab_sessions.",
+    {
+      projectFilePath: z.string().describe("Optional: the project you intend to work on. Enables the owner-guard so adoption won't grab another agent's AB running a different project.").optional(),
+    },
+    async (args: { projectFilePath?: string }) => {
       if (!launcher) {
         return {
           content: [{ type: 'text' as const, text: 'Persistent mode not configured. Use --mode persistent.' }],
@@ -342,10 +349,12 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         // a server recycle) over a fresh ~2min cold start. This is the path the
         // typical "--no-auto-launch + manual launch_codesys" setup hits after a
         // client reconnect, so adoption must live HERE too, not only in the
-        // background auto-launch block.
+        // background auto-launch block. When projectFilePath is given, the
+        // owner-guard restricts adoption to a matching/empty session.
+        const preferred = args.projectFilePath ? resolvePath(args.projectFilePath, workspaceDir) : undefined;
         let adopted = false;
         try {
-          adopted = await launcher.adoptExisting();
+          adopted = await launcher.adoptExisting(preferred);
         } catch (adoptErr) {
           const m = adoptErr instanceof Error ? adoptErr.message : String(adoptErr);
           serverLog.warn(`launch_codesys: adoptExisting() raised (ignored, will cold-launch): ${m}`);
@@ -545,6 +554,29 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
           content: [{ type: 'text' as const, text: `force_reset_watcher failed: ${msg}` }],
           isError: true,
         };
+      }
+    }
+  );
+
+  s.tool(
+    'list_ab_sessions',
+    "Lists every LIVE Automation Builder/CODESYS watcher session on this machine (fresh heartbeat + alive PID), with each one's PID, heartbeat age, and OPEN PROJECT. On a shared box where several agents each drive their own AB, use this to see who owns which project before launching/adopting -- and to confirm this server adopted the right instance ('isMine'). Read-only; safe anytime. Requires --mode persistent.",
+    async () => {
+      if (!launcher) {
+        return { content: [{ type: 'text' as const, text: 'Persistent mode not configured (--mode persistent).' }], isError: true };
+      }
+      try {
+        const sessions = await launcher.listLiveSessions();
+        if (sessions.length === 0) {
+          return { content: [{ type: 'text' as const, text: 'No live AB watcher sessions found on this machine.' }], isError: false };
+        }
+        const lines = sessions.map((s) =>
+          `${s.isMine ? '→ ' : '  '}session ${s.sessionId.slice(0, 8)}  pid=${s.pid ?? 'N/A'}  hb=${s.heartbeatAgeS.toFixed(1)}s  project=${s.projectPath ?? '(none)'}${s.isMine ? '  [this server]' : ''}`
+        );
+        return { content: [{ type: 'text' as const, text: `${sessions.length} live AB session(s):\n${lines.join('\n')}` }], isError: false };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: 'text' as const, text: `list_ab_sessions failed: ${msg}` }], isError: true };
       }
     }
   );
@@ -855,6 +887,33 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         result,
         `Code set for '${sanPouPath}' in ${args.projectFilePath}. Project saved.`
       );
+    }
+  );
+
+  s.tool(
+    'get_server_log',
+    "Returns the tail of the MCP server's lifecycle log file (--log-file). Use to self-diagnose AB lifecycle events (detachKeepAlive / Force-killing / soft-probe / adoption / teardown cause=...) without hunting for files on disk. Errors clearly if --log-file was not configured.",
+    {
+      lines: z.number().int().min(1).max(2000).describe("How many trailing lines to return. Default 100.").optional(),
+    },
+    async (args: { lines?: number }) => {
+      const lf = getLogFile();
+      if (!lf) {
+        return {
+          content: [{ type: 'text' as const, text: 'No log file configured. Start the server with --log-file <path> to persist lifecycle logs (stderr is not saved under Claude Code CLI). Current in-memory state is available via get_codesys_status / diagnose_mcp_state.' }],
+          isError: true,
+        };
+      }
+      try {
+        const raw = fs.readFileSync(lf, 'utf-8');
+        const all = raw.split(/\r?\n/);
+        const n = args.lines ?? 100;
+        const tail = all.slice(Math.max(0, all.length - n)).join('\n');
+        return { content: [{ type: 'text' as const, text: `Log file: ${lf} (last ${Math.min(n, all.length)} lines)\n\n${tail}` }], isError: false };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: 'text' as const, text: `Could not read log file ${lf}: ${msg}` }], isError: true };
+      }
     }
   );
 

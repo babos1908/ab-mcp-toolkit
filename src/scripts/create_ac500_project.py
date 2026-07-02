@@ -39,6 +39,7 @@ try:
         try:
             os.remove(NEW_PROJECT_PATH)
         except Exception as rm_err:
+            print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
             raise RuntimeError("Could not remove existing target: %s" % rm_err)
 
     target_dir = os.path.dirname(NEW_PROJECT_PATH)

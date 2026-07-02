@@ -9,6 +9,7 @@ try:
     print("DEBUG: create_project_archive: Path='%s' Comment='%s' Libs=%s Compiled=%s" %
           (ARCHIVE_PATH, COMMENT, INCLUDE_LIBRARIES, INCLUDE_COMPILED))
     if not ARCHIVE_PATH:
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise ValueError("Archive output path empty.")
 
     # Read-only verifier - the project must already be open. We don't open
@@ -30,6 +31,7 @@ try:
             print("DEBUG: Using primary_project.%s" % fn_name)
             break
     if save_fn is None:
+        print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
         raise RuntimeError(
             "No archive method found on the project object. "
             "Tried: save_archive, save_as_archive, archive, save_archived. "
@@ -102,6 +104,7 @@ try:
 
     # Sanity-check the file was actually written.
     if not os.path.exists(ARCHIVE_PATH):
+        print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
         raise RuntimeError(
             "Archive call returned without error but output file '%s' does not exist." %
             ARCHIVE_PATH

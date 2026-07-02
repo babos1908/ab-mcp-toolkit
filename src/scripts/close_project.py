@@ -63,6 +63,7 @@ try:
                 print("DEBUG: Project saved before close.")
         except Exception as save_err:
             # Surface as a real error: silent save-failure could lose work.
+            print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
             raise RuntimeError(
                 "Failed to save project before close: %s. "
                 "Pass force=true to discard unsaved changes." % save_err
@@ -72,6 +73,7 @@ try:
 
     # Close. CODESYS V3 exposes ScriptObject.close() on the project object.
     if not hasattr(pp, 'close'):
+        print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
         raise TypeError("Primary project object does not support close().")
     pp.close()
     print("DEBUG: pp.close() returned.")

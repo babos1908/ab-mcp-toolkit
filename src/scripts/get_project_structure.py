@@ -77,5 +77,6 @@ except Exception as e:
     detailed_error = traceback.format_exc()
     print("Error getting structure for %s: %s" % (PROJECT_FILE_PATH, e))
     print(detailed_error)
+    print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
     print("SCRIPT_ERROR: %s" % e)
     sys.exit(1)

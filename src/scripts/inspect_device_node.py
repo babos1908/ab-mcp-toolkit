@@ -6,10 +6,12 @@ try:
     print("DEBUG: inspect_device_node: device='%s'" % DEVICE_PATH)
     primary_project = require_project_open(PROJECT_FILE_PATH)
     if not DEVICE_PATH:
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise ValueError("Device path empty.")
 
     device = find_object_by_path_robust(primary_project, DEVICE_PATH, "device")
     if device is None:
+        print("SCRIPT_ERROR_CODE: ERR_OBJECT_NOT_FOUND")
         raise ValueError("Device not found at path: %s" % DEVICE_PATH)
 
     device_name = getattr(device, 'get_name', lambda: '?')()

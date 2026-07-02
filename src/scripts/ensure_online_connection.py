@@ -27,6 +27,7 @@ def ensure_online_connection(primary_project):
                 target_app = child
                 break
     if not target_app:
+        print("SCRIPT_ERROR_CODE: ERR_OBJECT_NOT_FOUND")
         raise RuntimeError(
             "No active application found. Open the project in the IDE and "
             "right-click the Application node -> Set Active Application."
@@ -164,6 +165,7 @@ def ensure_online_connection(primary_project):
         ) % (app_name, e)
         raise RuntimeError(msg)
 
+    print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
     raise RuntimeError(
         "create_online_application returned None for '%s'." % app_name
     )

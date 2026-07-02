@@ -5,7 +5,7 @@ VARIABLE_PATH = "{VARIABLE_PATH}"
 try:
     print("DEBUG: read_variable script: Variable='%s', Project='%s'" % (VARIABLE_PATH, PROJECT_FILE_PATH))
     primary_project = ensure_project_open(PROJECT_FILE_PATH)
-    if not VARIABLE_PATH: raise ValueError("Variable path empty.")
+    if not VARIABLE_PATH: print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT"); raise ValueError("Variable path empty.")
 
     online_app, target_app = ensure_online_connection(primary_project)
     app_name = getattr(target_app, 'get_name', lambda: "Unknown")()
@@ -32,6 +32,7 @@ try:
             raw_repr = _to_unicode(repr(result))
         print("DEBUG: read returned (truncated): %s" % (value_repr[:200] if value_repr else None))
     else:
+        print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
         raise TypeError("Online application does not support read_value() or read().")
 
     # Structured result via the standard RESULT_JSON marker block - lets the

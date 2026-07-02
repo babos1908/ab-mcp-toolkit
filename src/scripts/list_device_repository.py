@@ -29,6 +29,7 @@ try:
             print("DEBUG: Using script_engine.%s" % attr)
             break
     if repo is None:
+        print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
         raise RuntimeError(
             "Could not locate the CODESYS device repository on script_engine. "
             "Tried: %s. Use the IDE Tools -> Device Repository dialog instead." %
@@ -71,6 +72,7 @@ try:
             listing_attr = 'iter(repo)'
             print("DEBUG: Got listing via iter(repo) (%d entries)" % len(listing))
         except Exception as e:
+            print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
             raise RuntimeError(
                 "Could not enumerate device repository. Tried get_all_devices, get_devices, "
                 "list_all_devices, devices, all_devices, descriptions, and iter(repo). "

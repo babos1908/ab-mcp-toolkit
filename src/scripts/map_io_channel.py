@@ -23,16 +23,20 @@ try:
           (DEVICE_PATH, CHANNEL_PATH, VARIABLE_NAME, CLEAR_BINDING))
     primary_project = ensure_project_open(PROJECT_FILE_PATH)
     if not DEVICE_PATH:
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise ValueError("Device path empty.")
     if not CHANNEL_PATH:
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise ValueError("Channel path empty.")
 
     clear_binding = (CLEAR_BINDING == "1")
     if not clear_binding and not VARIABLE_NAME:
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise ValueError("variableName is required unless clearBinding is true.")
 
     device = find_object_by_path_robust(primary_project, DEVICE_PATH, "device")
     if device is None:
+        print("SCRIPT_ERROR_CODE: ERR_OBJECT_NOT_FOUND")
         raise ValueError("Device not found at path: %s" % DEVICE_PATH)
 
     # ---- Parse CHANNEL_PATH ------------------------------------------------
@@ -46,6 +50,7 @@ try:
         spec, sub_part = spec.rsplit('/', 1)
         sub_part = sub_part.strip()
         if not sub_part.isdigit():
+            print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
             raise ValueError("Sub-element index must be numeric, got '%s'." % sub_part)
         sub_index = int(sub_part)
     spec = spec.strip()
@@ -54,6 +59,7 @@ try:
     # ---- Locate the channel parameter across connectors --------------------
     conns = getattr(device, 'connectors', None)
     if conns is None:
+        print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
         raise RuntimeError("Device has no 'connectors'; cannot reach I/O channels on this node.")
 
     matches = []  # (connector, param, iface_name)
@@ -89,11 +95,13 @@ try:
                 continue
 
     if not matches:
+        print("SCRIPT_ERROR_CODE: ERR_OBJECT_NOT_FOUND")
         raise ValueError(
             "No parameter matching '%s' found on '%s' (interface filter: %s). "
             "Connector interfaces present: %s. Use inspect_device_node to list channels." %
             (spec, DEVICE_PATH, iface_filter or '(none)', ', '.join(seen_ifaces)))
     if len(matches) > 1:
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise ValueError(
             "Parameter '%s' is ambiguous on '%s': found on connectors %s. "
             "Prefix the channel path with an interface substring, e.g. 'IOBus:%s'." %
@@ -117,11 +125,13 @@ try:
             except Exception as e:
                 sub_errors.append("list(param.DataElement) failed: %s" % e)
         if not subs:
+            print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
             raise ValueError(
                 "Parameter %s has no enumerable sub-elements (%s). has_sub_elements=%s" %
                 (target_label, ' | '.join(sub_errors),
                  getattr(param, 'has_sub_elements', '?')))
         if sub_index >= len(subs):
+            print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
             raise ValueError("Sub-element index %d out of range: %s has %d sub-elements." %
                              (sub_index, target_label, len(subs)))
         target = subs[sub_index]
@@ -133,6 +143,7 @@ try:
     # ---- Get the ScriptIoMapping handle ------------------------------------
     iom = getattr(target, 'io_mapping', None)
     if iom is None:
+        print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
         raise RuntimeError(
             "Element %s exposes no io_mapping (is_mappable_io=%s). Element members: %s" %
             (target_label, getattr(target, 'is_mappable_io', '?'),
@@ -193,6 +204,7 @@ try:
                 set_attempts.append("element.%s failed: %s" % (attr, e))
 
     if not success:
+        print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
         raise RuntimeError(
             "Could not %s channel binding. Tried: %s. Last error: %s. "
             "io_mapping members: %s" %
@@ -209,6 +221,7 @@ try:
     # or missing channel binding is a real plant-safety issue.
     if clear_binding:
         if after_binding:  # _read_binding returns None/empty when cleared
+            print("SCRIPT_ERROR_CODE: ERR_WRITE_DID_NOT_STICK")
             raise RuntimeError(
                 "Clear binding did not stick on %s :: %s: still bound to '%s' "
                 "after the write (tried: %s). The scripting API accepted the "
@@ -217,6 +230,7 @@ try:
     else:
         ab = _to_unicode(after_binding) if after_binding else u""
         if ab.strip() != target_value.strip():
+            print("SCRIPT_ERROR_CODE: ERR_WRITE_DID_NOT_STICK")
             raise RuntimeError(
                 "I/O mapping did not stick on %s :: %s: wrote '%s' but read back "
                 "'%s' (tried: %s). The scripting API accepted the assignment but "

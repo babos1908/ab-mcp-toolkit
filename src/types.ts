@@ -68,6 +68,16 @@ export enum MCPErrorCode {
   /** Operation is restricted to AB Premium edition. */
   ERR_PREMIUM_ONLY = 'ERR_PREMIUM_ONLY',
 
+  // ─── Write verification ───────────────────────────────────────────
+  /** A write (set_pou_code / set_library_parameter / create_gvl / ...) reported success but read-back did not match. */
+  ERR_WRITE_DID_NOT_STICK = 'ERR_WRITE_DID_NOT_STICK',
+  /** reset_library_parameter reported success but the parameter still differs from its default on read-back. */
+  ERR_RESET_DID_NOT_STICK = 'ERR_RESET_DID_NOT_STICK',
+  /** rename_object reported success but the object still has the old name on read-back. */
+  ERR_RENAME_DID_NOT_STICK = 'ERR_RENAME_DID_NOT_STICK',
+  /** Static analysis is not available on this build (run_static_analysis). */
+  ERR_SA_NOT_AVAILABLE = 'ERR_SA_NOT_AVAILABLE',
+
   // ─── Input validation ─────────────────────────────────────────────
   /** Tool parameter validation failed (missing/invalid). */
   ERR_BAD_INPUT = 'ERR_BAD_INPUT',

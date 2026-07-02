@@ -28,11 +28,11 @@ try:
     print("DEBUG: Getting code: POU_FULL_PATH='%s', Project='%s'" % (POU_FULL_PATH, PROJECT_FILE_PATH))
     # Resource read - refuse to silently switch projects.
     primary_project = require_project_open(PROJECT_FILE_PATH)
-    if not POU_FULL_PATH: raise ValueError("POU full path empty.")
+    if not POU_FULL_PATH: print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT"); raise ValueError("POU full path empty.")
 
     # Find the target POU/Method/Property object
     target_object = find_object_by_path_robust(primary_project, POU_FULL_PATH, "target object")
-    if not target_object: raise ValueError("Target object not found using path: %s" % POU_FULL_PATH)
+    if not target_object: print("SCRIPT_ERROR_CODE: ERR_OBJECT_NOT_FOUND"); raise ValueError("Target object not found using path: %s" % POU_FULL_PATH)
 
     target_name = getattr(target_object, 'get_name', lambda: POU_FULL_PATH)()
     print("DEBUG: Found target object: %s" % target_name)

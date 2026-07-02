@@ -28,8 +28,8 @@ if hasattr(script_engine.PouType, 'ParameterList'):
 try:
     print("DEBUG: create_pou script: Name='%s', Type='%s', Lang='%s', ParentPath='%s', Project='%s'" % (POU_NAME, POU_TYPE_STR, IMPL_LANGUAGE_STR, PARENT_PATH_REL, PROJECT_FILE_PATH))
     primary_project = ensure_project_open(PROJECT_FILE_PATH)
-    if not POU_NAME: raise ValueError("POU name empty.")
-    if not PARENT_PATH_REL: raise ValueError("Parent path empty.")
+    if not POU_NAME: print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT"); raise ValueError("POU name empty.")
+    if not PARENT_PATH_REL: print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT"); raise ValueError("Parent path empty.")
 
     # Resolve POU Type Enum (Interface / ParameterList may be None here --
     # we have dedicated create_interface() / create_parameterlist() methods
@@ -37,6 +37,7 @@ try:
     pou_type_enum = pou_type_map.get(POU_TYPE_STR)
     if pou_type_enum is None and POU_TYPE_STR not in ("Interface", "ParameterList"):
         available = sorted(pou_type_map.keys())
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise ValueError(
             "Invalid POU type string: '%s'. Use one of: %s" % (POU_TYPE_STR, available)
         )
@@ -88,6 +89,7 @@ try:
 
     # Final check if parent was found
     if not parent_object:
+        print("SCRIPT_ERROR_CODE: ERR_OBJECT_NOT_FOUND")
         raise ValueError("Parent object not found for path: %s. Try using the full path like 'ProjectName.Application' or run get_project_structure first to see the correct structure." % PARENT_PATH_REL)
 
     parent_name = getattr(parent_object, 'get_name', lambda: str(parent_object))()
@@ -95,6 +97,7 @@ try:
 
     # Check if parent object supports creating POUs (should implement ScriptIecLanguageObjectContainer)
     if not hasattr(parent_object, 'create_pou'):
+        print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
         raise TypeError("Parent object '%s' of type %s does not support create_pou." % (parent_name, type(parent_object).__name__))
 
     # Set language GUID to None (let CODESYS default based on parent/settings)
@@ -146,6 +149,7 @@ try:
         if new_pou is None:
             pou_types = [a for a in dir(script_engine.PouType) if not a.startswith('_')]
             parent_creates = [a for a in dir(parent_object) if a.lower().startswith('create')]
+            print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
             raise RuntimeError(
                 "Could not create Interface '%s'. Neither parent.create_interface() nor "
                 "parent.create_pou(type=PouType.Interface) succeeded on this build. "
@@ -257,6 +261,7 @@ try:
             )
             present_on_parent = [n for n in probe_names if hasattr(parent_object, n)]
             pou_types = [a for a in dir(script_engine.PouType) if not a.startswith('_')]
+            print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
             raise RuntimeError(
                 "Could not create ParameterList '%s'. No working API path found on this "
                 "AB / CODESYS build (likely the Standard edition, which does not surface "
@@ -272,6 +277,7 @@ try:
     elif pou_type_enum == script_engine.PouType.Function:
         actual_return_type = RETURN_TYPE if RETURN_TYPE else None
         if actual_return_type is None:
+            print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
             raise ValueError("Function POU '%s' requires a return_type. Provide the 'returnType' tool parameter (e.g. 'BOOL', 'STRING', 'INT')." % POU_NAME)
         new_pou = parent_object.create_pou(
             name=POU_NAME,
@@ -300,6 +306,7 @@ try:
             print("ERROR: Failed to save Project after POU creation: %s" % save_err)
             detailed_error = traceback.format_exc()
             error_message = "Error saving Project after creating POU '%s': %s\\n%s" % (new_pou_name, save_err, detailed_error)
+            print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
             print(error_message); print("SCRIPT_ERROR: %s" % error_message); sys.exit(1)
         # --- END SAVING ---
 
@@ -312,6 +319,7 @@ try:
     else:
         error_message = "Failed to create POU '%s'. create_pou returned None." % POU_NAME
         print(error_message)
+        print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
         print("SCRIPT_ERROR: %s" % error_message)
         sys.exit(1)
 except Exception as e:

@@ -64,6 +64,7 @@ try:
             print("DEBUG: child-search for Project Information failed: %s" % cerr)
 
     if info is None:
+        print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
         raise RuntimeError(
             "Project Information node not accessible via ScriptEngine on this build. "
             "Tried get_project_info(), primary_project.{project_info|project_information|"
@@ -128,6 +129,7 @@ try:
         primary_project.save()
         print("DEBUG: Project saved after Project Information update.")
     except Exception as save_err:
+        print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
         raise RuntimeError("Failed to save project after info update: %s" % save_err)
 
     print("Applied fields: %d" % len(applied))

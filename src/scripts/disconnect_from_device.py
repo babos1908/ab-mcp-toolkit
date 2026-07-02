@@ -12,6 +12,7 @@ try:
                 target_app = child
                 break
     if not target_app:
+        print("SCRIPT_ERROR_CODE: ERR_OBJECT_NOT_FOUND")
         raise RuntimeError("No application found in project.")
 
     app_name = getattr(target_app, 'get_name', lambda: "Unknown")()
@@ -40,6 +41,7 @@ try:
             # versions; surface as success but log the detail.
             print("DEBUG: logout() raised (treating as already-out): %s" % e)
     else:
+        print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
         raise TypeError("Online application does not support logout().")
 
     print("Disconnected from device for application: %s" % app_name)

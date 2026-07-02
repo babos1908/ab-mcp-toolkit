@@ -7,6 +7,7 @@ try:
     print("DEBUG: set_credentials: user='%s' password=<%d chars>" % (
         USERNAME, len(PASSWORD)))
     if not USERNAME:
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise ValueError(
             "Username is required. CODESYS set_default_credentials rejects "
             "empty strings. If your runtime has no authentication, simply "
@@ -14,6 +15,7 @@ try:
         )
     import scriptengine as se
     if not hasattr(se.online, 'set_default_credentials'):
+        print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
         raise RuntimeError(
             "scriptengine.online.set_default_credentials is not available "
             "in this CODESYS version."

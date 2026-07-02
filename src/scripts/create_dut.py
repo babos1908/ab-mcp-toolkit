@@ -7,8 +7,8 @@ PARENT_PATH_REL = "{PARENT_PATH}"
 try:
     print("DEBUG: create_dut script: Name='%s', DutType='%s', ParentPath='%s', Project='%s'" % (DUT_NAME, DUT_TYPE_STR, PARENT_PATH_REL, PROJECT_FILE_PATH))
     primary_project = ensure_project_open(PROJECT_FILE_PATH)
-    if not DUT_NAME: raise ValueError("DUT name empty.")
-    if not PARENT_PATH_REL: raise ValueError("Parent path empty.")
+    if not DUT_NAME: print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT"); raise ValueError("DUT name empty.")
+    if not PARENT_PATH_REL: print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT"); raise ValueError("Parent path empty.")
 
     # Map DUT type string to enum
     dut_type_enum = None
@@ -38,6 +38,7 @@ try:
                     break
 
     if dut_type_enum is None:
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise ValueError("Could not resolve DUT type '%s'. Valid types: Structure, Enumeration, Union, Alias." % DUT_TYPE_STR)
 
     # Find parent object (same logic as create_pou)
@@ -72,6 +73,7 @@ try:
         parent_object = find_object_by_path_robust(primary_project, PARENT_PATH_REL, "parent container")
 
     if not parent_object:
+        print("SCRIPT_ERROR_CODE: ERR_OBJECT_NOT_FOUND")
         raise ValueError("Parent object not found for path: %s" % PARENT_PATH_REL)
 
     parent_name = getattr(parent_object, 'get_name', lambda: str(parent_object))()
@@ -79,6 +81,7 @@ try:
 
     # Create the DUT
     if not hasattr(parent_object, 'create_dut'):
+        print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
         raise TypeError("Parent object '%s' of type %s does not support create_dut." % (parent_name, type(parent_object).__name__))
 
     print("DEBUG: Calling create_dut: Name='%s', Type=%s" % (DUT_NAME, dut_type_enum))
@@ -96,6 +99,7 @@ try:
             print("ERROR: Failed to save Project after DUT creation: %s" % save_err)
             detailed_error = traceback.format_exc()
             error_message = "Error saving Project after creating DUT '%s': %s\n%s" % (DUT_NAME, save_err, detailed_error)
+            print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
             print(error_message); print("SCRIPT_ERROR: %s" % error_message); sys.exit(1)
 
         print("DUT Created: %s" % new_dut_name)
@@ -105,6 +109,7 @@ try:
         sys.exit(0)
     else:
         error_message = "Failed to create DUT '%s'. create_dut returned None." % DUT_NAME
+        print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
         print(error_message); print("SCRIPT_ERROR: %s" % error_message); sys.exit(1)
 except Exception as e:
     detailed_error = traceback.format_exc()

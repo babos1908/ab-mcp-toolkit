@@ -22,6 +22,7 @@ try:
           (PARENT_DEVICE_PATH, DEVICE_NAME, DEVICE_TYPE_STR, DEVICE_ID_STR, DEVICE_VERSION))
     primary_project = ensure_project_open(PROJECT_FILE_PATH)
     if not PARENT_DEVICE_PATH:
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise ValueError("Parent device path empty.")
 
     mode = 'add_child'
@@ -33,19 +34,23 @@ try:
         mode = 'update'
         target_path = PARENT_DEVICE_PATH[len('__update__:'):]
         if not target_path:
+            print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
             raise ValueError("__update__: sentinel requires a device path after the colon.")
 
     if mode != 'update' and not DEVICE_NAME:
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise ValueError("Device name empty.")
 
     try:
         device_type = int(DEVICE_TYPE_STR)
     except Exception:
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise ValueError("deviceType must be a numeric CODESYS device type id (e.g. 33000 for S500 modules).")
 
     try:
         device_id = int(DEVICE_ID_STR) if DEVICE_ID_STR else None
     except Exception:
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise ValueError("deviceId must be numeric or empty.")
 
     # ---- Resolve a DeviceID handle from the device repository -------------
@@ -96,6 +101,7 @@ try:
     if device_id is not None:
         repo = getattr(script_engine, 'device_repository', None)
         if repo is None:
+            print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
             raise RuntimeError("script_engine.device_repository unavailable; cannot resolve DeviceID.")
         for entry in repo.get_all_devices():
             did = getattr(entry, 'device_id', entry)
@@ -108,6 +114,7 @@ try:
                 candidates.append("type=%s Id='%s' Version='%s' (version mismatch)" % (t, i, v))
                 continue
             if did_obj is not None:
+                print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
                 raise RuntimeError(
                     "Ambiguous DeviceID match for type=%d id=%d version='%s': both '%s' and type=%s Id='%s' Version='%s'. "
                     "Pass an exact version to disambiguate." %
@@ -115,6 +122,7 @@ try:
             did_obj = did
             did_repr = "type=%s Id='%s' Version='%s'" % (t, i, v)
         if did_obj is None:
+            print("SCRIPT_ERROR_CODE: ERR_OBJECT_NOT_FOUND")
             raise RuntimeError(
                 "No repository device matches type=%d id=%d version='%s'. Near-misses: %s" %
                 (device_type, device_id, DEVICE_VERSION,
@@ -141,32 +149,40 @@ try:
     if mode == 'update':
         dev_obj = find_object_by_path_robust(primary_project, target_path, "device to update")
         if dev_obj is None:
+            print("SCRIPT_ERROR_CODE: ERR_OBJECT_NOT_FOUND")
             raise ValueError("Device to update not found at path: %s" % target_path)
         if did_obj is None:
+            print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
             raise ValueError("update mode requires deviceId (and ideally version).")
         if not hasattr(dev_obj, 'update'):
             public = sorted([m for m in dir(dev_obj) if not m.startswith('_')])
+            print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
             raise TypeError("Device at '%s' has no update(); exposes: %s" % (target_path, ', '.join(public)))
         _try("update(deviceid=did)", lambda: dev_obj.update(deviceid=did_obj))
         _try("update(did)", lambda: dev_obj.update(did_obj))
         _try("update(name, did)", lambda: dev_obj.update(DEVICE_NAME or None, did_obj))
         if new_device is None:
+            print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
             raise RuntimeError("All update() signatures failed. Tried: %s" % ' | '.join(attempts))
         result_name = getattr(dev_obj, 'get_name', lambda: target_path)()
 
     elif mode == 'add_root':
         if did_obj is None:
+            print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
             raise ValueError("add_root mode requires deviceId.")
         if not hasattr(primary_project, 'add'):
+            print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
             raise TypeError("project object has no add(); cannot create top-level device.")
         _try("project.add(name, did)", lambda: primary_project.add(DEVICE_NAME, did_obj))
         if new_device is None:
+            print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
             raise RuntimeError("project.add failed. Tried: %s" % ' | '.join(attempts))
         result_name = DEVICE_NAME
 
     else:
         parent_obj = find_object_by_path_robust(primary_project, PARENT_DEVICE_PATH, "parent device")
         if parent_obj is None:
+            print("SCRIPT_ERROR_CODE: ERR_OBJECT_NOT_FOUND")
             raise ValueError("Parent device not found at path: %s" % PARENT_DEVICE_PATH)
 
         if did_obj is not None:
@@ -200,6 +216,7 @@ try:
 
         if new_device is None:
             public = sorted([m for m in dir(parent_obj) if not m.startswith('_')])
+            print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
             raise RuntimeError(
                 "add_device produced no node. Tried: %s. Last error: %s. Parent exposes: %s" %
                 (' | '.join(attempts), last_err, ', '.join(public)))

@@ -53,6 +53,7 @@ try:
         CYCLE_TIME_MS_STR, WATCHDOG_TIME_MS_STR, PRIORITY_STR, STACK_SIZE_BYTES_STR))
     primary_project = ensure_project_open(PROJECT_FILE_PATH)
     if not TASK_NAME:
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise ValueError("Task name empty.")
 
     cycle_ms    = _maybe_int(CYCLE_TIME_MS_STR)
@@ -61,6 +62,7 @@ try:
     stack_bytes = _maybe_int(STACK_SIZE_BYTES_STR)
 
     if cycle_ms is None and watchdog_ms is None and priority is None and stack_bytes is None:
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise ValueError(
             "At least one of cycleTimeMs / watchdogTimeMs / priority / "
             "stackSizeBytes must be provided.")
@@ -134,6 +136,7 @@ try:
             pass
 
     if task_obj is None:
+        print("SCRIPT_ERROR_CODE: ERR_OBJECT_NOT_FOUND")
         raise RuntimeError(
             "Task '%s' not found in any Task Configuration node. Inspect via "
             "get_task_configuration to confirm the exact name." % TASK_NAME)
@@ -274,6 +277,7 @@ try:
         primary_project.save()
         print("DEBUG: Project saved after task parameter update.")
     except Exception as save_err:
+        print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
         raise RuntimeError("Failed to save project after task update: %s" % save_err)
 
     print("Task: %s" % TASK_NAME)

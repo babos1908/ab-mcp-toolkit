@@ -115,6 +115,7 @@ try:
 
     # Verify the file was actually written.
     if not os.path.exists(OUTPUT_XML_PATH):
+        print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
         raise RuntimeError(
             "export_plcopenxml call succeeded but output file does not exist: %s" %
             OUTPUT_XML_PATH

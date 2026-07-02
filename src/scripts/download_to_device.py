@@ -13,6 +13,7 @@ def _login(online_app, mode):
     # (login(bForceLogin: bool) vs legacy login() no-args). See its
     # docstring for the empirical history.
     if not hasattr(online_app, 'login'):
+        print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
         raise TypeError("Online application does not support login().")
 
     if mode == 'full':
@@ -24,6 +25,7 @@ def _login(online_app, mode):
     # 'online_change' or 'auto' - both want TryOnlineChange first.
     if not hasattr(script_engine, 'OnlineChangeOption'):
         if mode == 'online_change':
+            print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
             raise RuntimeError(
                 "OnlineChangeOption not available in this CODESYS version; "
                 "use mode='full' instead."
@@ -38,6 +40,7 @@ def _login(online_app, mode):
         print("DEBUG: Logged in with TryOnlineChange.")
     except Exception as e:
         if mode == 'online_change':
+            print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
             raise RuntimeError(
                 "Online change rejected: %s. The change is structural; "
                 "use mode='full' or mode='auto' to allow a full download." % e
@@ -64,6 +67,7 @@ try:
         online_app.create_boot_application()
         print("DEBUG: Boot application created.")
     else:
+        print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
         raise TypeError("Online application does not support download().")
 
     print("Downloaded to device for application: %s" % app_name)

@@ -84,6 +84,7 @@ try:
             print("DEBUG:   %s[%s] %s (%s)" % ("  " * d, d, n, t))
 
     if not task_configs:
+        print("SCRIPT_ERROR_CODE: ERR_OBJECT_NOT_FOUND")
         raise RuntimeError(
             "No Task Configuration node found in the project. Library projects "
             "typically have none -- Task Configuration is on consumer projects "
