@@ -59,7 +59,13 @@ try:
         values = {}
         for var_path in variable_paths:
             try:
-                result = read_fn(var_path)
+                # UNVERIFIED on this build (see ensure_online_connection.py
+                # module docstring): with_executor wraps each sample so a
+                # per-iteration "Stack empty" doesn't tank the whole capture.
+                # Adds ExecuteSource overhead per sample -- fine at typical
+                # monitor intervals (>=10ms floor), but the tightest polling
+                # will be slower than the pre-fix direct call was.
+                result = with_executor(read_fn, var_path)
                 if result is None:
                     values[_to_unicode(var_path)] = None
                 elif is_value_object and hasattr(result, 'value'):

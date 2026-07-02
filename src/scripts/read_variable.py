@@ -14,8 +14,11 @@ try:
     var_type = None
     raw_repr = None
 
+    # Read routed through with_executor (UNVERIFIED on this build, see
+    # ensure_online_connection.py module docstring): can hit "Stack empty"
+    # from a pure IPC script the same way create_online_application does.
     if hasattr(online_app, 'read_value'):
-        result = online_app.read_value(VARIABLE_PATH)
+        result = with_executor(online_app.read_value, VARIABLE_PATH)
         if result is not None:
             raw_repr = _to_unicode(repr(result))
             if hasattr(result, 'value'):
@@ -26,7 +29,7 @@ try:
                 value_repr = _to_unicode(unicode(result) if not isinstance(result, unicode) else result)
         print("DEBUG: read_value returned (truncated): %s" % (value_repr[:200] if value_repr else None))
     elif hasattr(online_app, 'read'):
-        result = online_app.read(VARIABLE_PATH)
+        result = with_executor(online_app.read, VARIABLE_PATH)
         if result is not None:
             value_repr = _to_unicode(unicode(result) if not isinstance(result, unicode) else result)
             raw_repr = _to_unicode(repr(result))

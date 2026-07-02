@@ -7,11 +7,13 @@ try:
     online_app, target_app = ensure_online_connection(primary_project)
     app_name = getattr(target_app, 'get_name', lambda: "Unknown")()
 
-    # Get application state
+    # Get application state. Routed through with_executor (UNVERIFIED on
+    # this build, see ensure_online_connection.py module docstring):
+    # property reads can also hit "Stack empty" from a pure IPC script.
     state = "unknown"
     if hasattr(online_app, 'application_state'):
         try:
-            state = str(online_app.application_state)
+            state = str(with_executor(lambda: online_app.application_state))
         except Exception as e:
             print("WARN: Could not read application_state: %s" % e)
     else:
@@ -21,7 +23,7 @@ try:
     is_logged_in = "unknown"
     if hasattr(online_app, 'is_logged_in'):
         try:
-            is_logged_in = str(online_app.is_logged_in)
+            is_logged_in = str(with_executor(lambda: online_app.is_logged_in))
         except Exception:
             pass
 

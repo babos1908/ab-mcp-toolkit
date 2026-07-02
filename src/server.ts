@@ -134,6 +134,11 @@ async function fileExists(filePath: string): Promise<boolean> {
  * roughly chronological. Each entry maps a short stable ID to a description.
  */
 const MCP_PATCHES: Array<{ id: string; description: string }> = [
+  { id: 'online-executor-fallback-UNVERIFIED', description: '⚠️ UNVERIFIED ON AB2.9/SP19 (2026-06-29). Ported from luke-harriman/Codesys-MCP a063aad (verified there on CODESYS V3 SP16, ifm hardware -- different vendor+SP than ours). Root cause: create_online_application and every scriptengine.online op raise "Stack empty" from IPC-driven scripts because the IDE-internal _executionStack only populates via the executor Executing event, which IPC bypasses -- independently diagnosed by both projects. Fix: reflect into scriptengine.online._executor and route calls through its ExecuteSource(source), which fires Executing/Executed. with_executor() wraps connect_to_device/download_to_device/start_stop_application/get_application_state/read_variable/write_variable/monitor_variables. Degrades to a direct call (today\'s behavior, same error) if reflection fails on this build -- cannot regress. write_variable also switched to the canonical set_prepared_value+force_prepared_values (write_value/write don\'t exist on IScriptOnlineApplication SP14+), with a legacy fallback. Needs an on-PLC test against AB2.9/AC500 before the "online is dead" framing elsewhere in the skill/docs is revised.' },
+  { id: 'online-tools-latent-nameerror-fix', description: 'connect_to_device and download_to_device called safe_online_login() (defined in _text_utils.py) without _text_utils in their helpers array -- a latent NameError that never surfaced because execution always failed earlier at the Stack-empty error. Found 2026-06-29 while porting the executor fallback (which can let execution reach login() for the first time). Fixed by adding _text_utils to both.' },
+  { id: 'resolve-device-address-UNVERIFIED', description: '⚠️ UNVERIFIED on this build. resolve_device_address() (ensure_online_connection.py) converts the raw-IP gateway address to the Network/Block-Driver node-address form V3 login actually routes by (scan-and-resolve), fixing a possible "Network error: No route to host" even when the IP is reachable. Called best-effort after set_gateway_and_address in connect_to_device; a None return leaves prior behavior unchanged. Ported from a063aad.' },
+  { id: 'list-device-repository-broader-probes', description: 'list_device_repository: expanded name/vendor/category/description attribute candidate sets plus locale-aware callable invocation (some CODESYS localised getters need a locale arg) for builds where descriptor fields came back null. Read-only, no online dependency. Ported from upstream 0b465ad.' },
+  { id: 'create-project-dual-mode-and-templates', description: 'create_project gained templatePath (explicit .project to copy) and templateName (instantiate via CODESYS Template Manager -- required for package-installed templates with no free-standing .project file) kwargs alongside the existing auto-discovered-Standard.project default. New list_project_templates tool enumerates templates via ScriptEngine API + filesystem scan so callers know which kwarg to pass. Read-only/additive, no online dependency. Ported from upstream a81e7cb.' },
   { id: 'multi-instance-owner-guard', description: 'Shared-machine safety: adoptExisting(preferredProjectPath) live-probes each candidate session for its OPEN project and only adopts one matching that project (or empty) -- never grabs another agent\'s AB running a different project. New list_ab_sessions tool shows every live AB session (pid, heartbeat age, open project, isMine). launch_codesys gained an optional projectFilePath to enable the guard. 2026-06-29.' },
   { id: 'set-pou-code-content-readback', description: 'set_pou_code and create_gvl now read back the written text and FAIL (ERR_WRITE_DID_NOT_STICK) on mismatch OR embedded NUL -- catches both silent no-op writes and content corruption in transit (the 2026-05-27 Unicode->NUL bug that swallowed struct fields would have been caught instantly here instead of as 56 downstream compile errors). A requested section that could not be written+verified now hard-fails instead of a lying SCRIPT_SUCCESS.' },
   { id: 'get-server-log-tool', description: 'New get_server_log tool returns the tail of the --log-file (lifecycle markers: detachKeepAlive/Force-killing/soft-probe/adoption/cause=). Agents self-diagnose AB lifecycle without hunting for files (DKIT could not find the log on disk).' },
@@ -645,48 +650,74 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   s.tool(
     'create_project',
-    'Creates a new CODESYS project from the standard template.',
+    "Creates a new CODESYS project. Two modes: (A, default) copy a .project file and open it -- either the auto-discovered Standard.project, or an explicit templatePath; (B) instantiate a template registered with CODESYS's own Template Manager by templateName -- required for package-installed templates (e.g. a vendor device package) that have no free-standing .project file on disk. Use list_project_templates to discover which kwarg to pass.",
     {
       filePath: z.string().describe("Path where the new project file should be created."),
+      templatePath: z.string().describe("Optional: explicit path to a .project file to copy (mode A). If omitted and templateName is also omitted, the auto-discovered Standard.project is used.").optional(),
+      templateName: z.string().describe("Optional: name of a template registered with CODESYS's Template Manager to instantiate (mode B). Takes precedence over templatePath/auto-discovery when set. Use list_project_templates to find valid names.").optional(),
     },
-    async (args: { filePath: string }) => {
+    async (args: { filePath: string; templatePath?: string; templateName?: string }) => {
       const absPath = path.normalize(
         path.isAbsolute(args.filePath) ? args.filePath : path.join(workspaceDir, args.filePath)
       );
 
-      // Find template project
-      let templatePath = '';
-      try {
-        const baseDir = path.dirname(path.dirname(config.codesysPath));
-        templatePath = path.normalize(path.join(baseDir, 'Templates', 'Standard.project'));
-        if (!(await fileExists(templatePath))) {
-          const programData = process.env.ALLUSERSPROFILE || process.env.ProgramData || 'C:\\ProgramData';
-          const pd1 = path.normalize(path.join(programData, 'CODESYS', 'CODESYS', config.profileName, 'Templates', 'Standard.project'));
-          if (await fileExists(pd1)) {
-            templatePath = pd1;
-          } else {
-            const pd2 = path.normalize(path.join(programData, 'CODESYS', 'Templates', 'Standard.project'));
-            if (await fileExists(pd2)) {
-              templatePath = pd2;
+      const mode = args.templateName ? 'name' : 'path';
+      let templatePath = args.templatePath || '';
+
+      if (mode === 'path' && !templatePath) {
+        // Auto-discover Standard.project (original behavior, unchanged)
+        // when neither templatePath nor templateName was given.
+        try {
+          const baseDir = path.dirname(path.dirname(config.codesysPath));
+          templatePath = path.normalize(path.join(baseDir, 'Templates', 'Standard.project'));
+          if (!(await fileExists(templatePath))) {
+            const programData = process.env.ALLUSERSPROFILE || process.env.ProgramData || 'C:\\ProgramData';
+            const pd1 = path.normalize(path.join(programData, 'CODESYS', 'CODESYS', config.profileName, 'Templates', 'Standard.project'));
+            if (await fileExists(pd1)) {
+              templatePath = pd1;
             } else {
-              throw new Error('Standard template project file not found.');
+              const pd2 = path.normalize(path.join(programData, 'CODESYS', 'Templates', 'Standard.project'));
+              if (await fileExists(pd2)) {
+                templatePath = pd2;
+              } else {
+                throw new Error('Standard template project file not found. Pass templatePath or templateName explicitly, or run list_project_templates.');
+              }
             }
           }
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          return {
+            content: [{ type: 'text' as const, text: `Template Error: ${msg}` }],
+            isError: true,
+          };
         }
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        return {
-          content: [{ type: 'text' as const, text: `Template Error: ${msg}` }],
-          isError: true,
-        };
       }
 
       const script = scriptManager.prepareScript('create_project', {
         PROJECT_FILE_PATH: absPath,
+        TEMPLATE_MODE: mode,
         TEMPLATE_PROJECT_PATH: templatePath,
+        TEMPLATE_NAME: args.templateName || '',
       });
       const result = await executor.executeScript(script);
-      return formatToolResponse(result, `Project created from template: ${absPath}`);
+      return formatToolResponse(result, `Project created (mode=${mode}): ${absPath}`);
+    }
+  );
+
+  s.tool(
+    'list_project_templates',
+    "Enumerates project templates known to the local CODESYS install via two channels: (1) ScriptEngine projects.templates-style probes, which picks up templates registered by package installers (no free-standing .project file needed); (2) a filesystem scan of %ProgramData%/CODESYS template directories. Returns {name, path, source} per template so you know which kwarg to pass to create_project (templateName for API-sourced, templatePath for filesystem-sourced). Read-only.",
+    {
+      extraTemplateDir: z.string().describe("Optional additional directory to scan for .project/.projecttemplate/.projectarchive files.").optional(),
+    },
+    async (args: { extraTemplateDir?: string }) => {
+      const script = scriptManager.prepareScriptWithHelpers(
+        'list_project_templates',
+        { EXTRA_TEMPLATE_DIR: args.extraTemplateDir ? resolvePath(args.extraTemplateDir, workspaceDir) : '' },
+        ['_text_utils']
+      );
+      const result = await executor.executeScript(script);
+      return formatStructuredResponse(result, 'Project templates listed.');
     }
   );
 
@@ -2079,7 +2110,13 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
           IP_ADDRESS: (args.ipAddress || '').trim(),
           GATEWAY_NAME: (args.gatewayName || '').trim(),
         },
-        ['ensure_project_open', 'ensure_online_connection']
+        // _text_utils is REQUIRED here: the script calls safe_online_login()
+        // (defined there). It was missing from this list -- a latent
+        // NameError that never surfaced because execution always failed
+        // earlier at ensure_online_connection's Stack-empty error. Found
+        // 2026-06-29 while porting the ExecuteSource fallback, which can let
+        // execution reach the login() call for the first time.
+        ['_text_utils', 'ensure_project_open', 'ensure_online_connection']
       );
       const result = await executor.executeScript(script, 60_000);
       return formatToolResponse(result, `Connected to device for ${args.projectFilePath}.`);
@@ -2271,7 +2308,9 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       const script = scriptManager.prepareScriptWithHelpers(
         'download_to_device',
         { PROJECT_FILE_PATH: escaped, MODE: mode },
-        ['ensure_project_open', 'ensure_online_connection']
+        // _text_utils REQUIRED: _login() calls safe_online_login(). Same
+        // latent-NameError bug as connect_to_device, found 2026-06-29.
+        ['_text_utils', 'ensure_project_open', 'ensure_online_connection']
       );
       const result = await executor.executeScript(script, 120_000);
       return formatToolResponse(result, `Application downloaded to device for ${args.projectFilePath} (mode=${mode}).`);

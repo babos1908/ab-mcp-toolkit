@@ -3,7 +3,7 @@
 > Generated from `src/server.ts` by `scripts/gen-tool-catalog.js` (runs during `npm run build`).
 > Do NOT edit by hand -- your changes will be overwritten. Fix the tool description in `server.ts` instead.
 
-**74 tools.**
+**75 tools.**
 
 | Tool | Description |
 |---|---|
@@ -22,7 +22,7 @@
 | `create_gvl` | Creates a new Global Variable List (GVL) within the specified CODESYS project. |
 | `create_method` | Creates a new Method within a specific Function Block POU. |
 | `create_pou` | Creates a new Program, Function Block, Function, Interface, or Parameter List POU within the specified CODESYS project. |
-| `create_project` | Creates a new CODESYS project from the standard template. |
+| `create_project` | Creates a new CODESYS project. Two modes: (A, default) copy a .project file and open it -- either the auto-discovered Standard.project, or an explicit templatePath; (B) instantiate a template registered with CODESYS's own Template Manager by templateName -- required for package-installed templates (e.g. a vendor device package) that have no free-standing .project file on disk. Use list_project_templates to discover which kwarg to pass. |
 | `create_project_archive` | Saves the currently-open project as a .projectarchive. Read-only with respect to the project itself - the project must already be open (this tool will not switch projects). Output path may be absolute or relative to the workspace. |
 | `create_property` | Creates a new Property within a specific Function Block POU. |
 | `delete_object` | Deletes a project object (POU, DUT, GVL, folder, etc.) from the CODESYS project. WARNING: This is destructive and cannot be undone. System nodes (Application, Device, Plc Logic, Library Manager, Project Settings, Task Configuration, etc.) are refused. |
@@ -56,6 +56,7 @@
 | `list_device_repository` | Enumerate device descriptors from the local CODESYS Device Repository. Returns {name, vendor, device_type, device_id, version, description, category} per entry. Use to discover canonical ids for add_device. |
 | `list_library_repository` | Enumerate libraries installed in the CODESYS Library Repository (the System / User / Default repos). Returns one JSON entry per repository containing its libraries with name, version, company, location. Use to verify which versions are installed before/after install_library_to_repository or uninstall_library_from_repository -- saves the round-trip to 'Tools > Library Repository' in the AB UI. |
 | `list_project_libraries` | Lists all libraries currently referenced in the CODESYS project. |
+| `list_project_templates` | Enumerates project templates known to the local CODESYS install via two channels: (1) ScriptEngine projects.templates-style probes, which picks up templates registered by package installers (no free-standing .project file needed); (2) a filesystem scan of %ProgramData%/CODESYS template directories. Returns {name, path, source} per template so you know which kwarg to pass to create_project (templateName for API-sourced, templatePath for filesystem-sourced). Read-only. |
 | `map_io_channel` | Bind (or clear) a fieldbus I/O channel to a global variable symbol. Use inspect_device_node first to discover the channel layout. |
 | `monitor_variables` | Sample one or more PLC variables at a fixed interval over a bounded duration; returns the timeseries. Blocks the CODESYS UI thread (capped at 60s). |
 | `open_project` | Opens an existing CODESYS project file. |

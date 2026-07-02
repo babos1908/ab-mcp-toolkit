@@ -15,10 +15,13 @@ try:
     online_app, target_app = ensure_online_connection(primary_project)
     app_name = getattr(target_app, 'get_name', lambda: "Unknown")()
 
+    # start/stop routed through with_executor (UNVERIFIED on this build, see
+    # ensure_online_connection.py module docstring): can hit "Stack empty"
+    # from a pure IPC script the same way create_online_application does.
     if action_lower == 'start':
         if hasattr(online_app, 'start'):
             print("DEBUG: Calling start()...")
-            online_app.start()
+            with_executor(online_app.start)
             print("DEBUG: Application started.")
         else:
             print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
@@ -26,7 +29,7 @@ try:
     else:
         if hasattr(online_app, 'stop'):
             print("DEBUG: Calling stop()...")
-            online_app.stop()
+            with_executor(online_app.stop)
             print("DEBUG: Application stopped.")
         else:
             print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
@@ -36,7 +39,7 @@ try:
     state = "unknown"
     if hasattr(online_app, 'application_state'):
         try:
-            state = str(online_app.application_state)
+            state = str(with_executor(lambda: online_app.application_state))
         except Exception:
             pass
 

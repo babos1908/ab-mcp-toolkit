@@ -225,6 +225,24 @@ try:
                     print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
                     raise
 
+            # UNVERIFIED on this build (2026-06-29, ported from upstream a063aad):
+            # the raw IP form set above is a block-driver decimal encoding, but
+            # V3 login routes by the Network/Block-Driver NODE address the
+            # gateway assigns during a scan (e.g. '0301.B0F7'). Without this,
+            # login can raise "Network error: No route to host" even when the
+            # IP is reachable. Best-effort: scans the gateway and re-resolves
+            # the address; a None return leaves the IP-form address in place
+            # (today's behavior), so this cannot regress anything that worked.
+            try:
+                resolved = resolve_device_address(primary_project)
+                if resolved:
+                    print("DEBUG: resolved device address to node form '%s'" % resolved)
+                else:
+                    print("DEBUG: resolve_device_address found nothing to resolve; "
+                          "keeping the IP-form address as set.")
+            except Exception as resolve_err:
+                print("DEBUG: resolve_device_address raised (ignored, keeping IP-form address): %s" % resolve_err)
+
     # Gap 9: try to prime the online-context stack BEFORE the first call to
     # create_online_application. Best-effort; if priming fails, the existing
     # ensure_online_connection error message still guides the user to click
@@ -240,16 +258,19 @@ try:
     print("DEBUG: Calling login() on online application...")
     # safe_online_login() (from _text_utils.py) handles the V3.5 SP19 arity
     # requirement: login(bForceLogin: bool) vs legacy login() with no args.
-    # See its docstring for the empirical history.
+    # See its docstring for the empirical history. Routed through
+    # with_executor (UNVERIFIED on this build, see ensure_online_connection.py
+    # module docstring): login can hit "Stack empty" the same way
+    # create_online_application does when invoked from a pure IPC script.
     if hasattr(script_engine, 'OnlineChangeOption'):
         try:
-            safe_online_login(online_app, change_option=script_engine.OnlineChangeOption.TryOnlineChange)
+            with_executor(safe_online_login, online_app, script_engine.OnlineChangeOption.TryOnlineChange)
             print("DEBUG: Logged in with TryOnlineChange option.")
         except Exception as e:
             print("DEBUG: TryOnlineChange failed, trying plain login: %s" % e)
-            safe_online_login(online_app)
+            with_executor(safe_online_login, online_app, None)
     else:
-        safe_online_login(online_app)
+        with_executor(safe_online_login, online_app, None)
     print("DEBUG: Login successful.")
 
     state = "connected"

@@ -16,9 +16,13 @@ def _login(online_app, mode):
         print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
         raise TypeError("Online application does not support login().")
 
+    # All login attempts routed through with_executor (UNVERIFIED on this
+    # build, see ensure_online_connection.py module docstring): login can
+    # hit "Stack empty" from a pure IPC script the same way
+    # create_online_application does.
     if mode == 'full':
         # Plain login - no online change attempt.
-        safe_online_login(online_app)
+        with_executor(safe_online_login, online_app, None)
         print("DEBUG: Logged in (full download mode).")
         return
 
@@ -31,12 +35,12 @@ def _login(online_app, mode):
                 "use mode='full' instead."
             )
         # 'auto': no OCO available, plain login is the only path.
-        safe_online_login(online_app)
+        with_executor(safe_online_login, online_app, None)
         print("DEBUG: Logged in (no OnlineChangeOption available).")
         return
 
     try:
-        safe_online_login(online_app, change_option=script_engine.OnlineChangeOption.TryOnlineChange)
+        with_executor(safe_online_login, online_app, script_engine.OnlineChangeOption.TryOnlineChange)
         print("DEBUG: Logged in with TryOnlineChange.")
     except Exception as e:
         if mode == 'online_change':
@@ -47,7 +51,7 @@ def _login(online_app, mode):
             )
         # 'auto': fall back to plain login.
         print("DEBUG: TryOnlineChange failed, falling back to full login: %s" % e)
-        safe_online_login(online_app)
+        with_executor(safe_online_login, online_app, None)
 
 
 try:
@@ -61,10 +65,10 @@ try:
 
     print("DEBUG: Calling download()...")
     if hasattr(online_app, 'download'):
-        online_app.download()
+        with_executor(online_app.download)
         print("DEBUG: Download complete.")
     elif hasattr(online_app, 'create_boot_application'):
-        online_app.create_boot_application()
+        with_executor(online_app.create_boot_application)
         print("DEBUG: Boot application created.")
     else:
         print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
