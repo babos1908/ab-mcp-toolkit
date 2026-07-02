@@ -22,3 +22,4 @@ __pycache__/
 # Local config
 .mcp.json
 .claude/
+commit-msg-tmp.txt
