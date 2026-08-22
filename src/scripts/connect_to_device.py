@@ -11,7 +11,7 @@ def _resolve_gateway_guid(name):
     names depending on AB version. Probe in order; raise with the candidates
     seen if no match.
 
-    AB 2.9 / CODESYS V3.5 SP19 was observed (2026-05-26 by Stefano) to reject
+    AB 2.9 / CODESYS V3.5 SP19 was observed (2026-05-26) to reject
     set_gateway_and_address('Gateway-1', ...) with
         Guid should contain 32 digits with 4 dashes
     because the underlying API expects a GUID, not the display name. This
