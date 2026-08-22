@@ -1,0 +1,15 @@
+# Without this, a Windows clone with core.autocrlf=true rewrites LF to CRLF
+# inside binary files and corrupts them. docs/SETUP.pdf is the one that
+# actually ships to people, so this is not theoretical.
+*.pdf     binary
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.ico     binary
+*.zip     binary
+*.library binary
+*.project binary
+*.projectarchive binary
+*.app     binary
+*.crc     binary
