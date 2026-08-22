@@ -17,8 +17,10 @@
 #   3. Runs `npm install`, `npm run build`, `npm link` from the repo root.
 #   4. Registers the MCP server at user scope (`claude mcp add -s user codesys-persistent ...`)
 #      with sensible defaults for AB 2.9: `--mode persistent --no-auto-launch
-#      --ready-timeout-ms 600000 --timeout 600000`.
-#   5. Verifies registration with `claude mcp list`.
+#      --ready-timeout-ms 600000 --timeout 600000 --keep-alive --backup-retention 5
+#      --log-file %TEMP%\codesys-mcp-server.log`.
+#   5. Installs the codesys-ab Claude Code skill (never overwrites an existing one).
+#   6. Verifies registration with `claude mcp list`.
 #
 # Re-run safe: if codesys-persistent is already registered it is removed and re-added
 # with the latest flags. `npm link` is also re-applied so the global binary points
@@ -30,6 +32,14 @@ param(
     [string]$CodesysProfile = 'Automation Builder 2.9',
     [int]$ReadyTimeoutMs = 600000,
     [int]$CommandTimeoutMs = 600000,
+    [int]$BackupRetention = 5,
+    # AB survives MCP server recycles (compact/reconnect); the next launch_codesys
+    # adopts the live instance instead of a ~2min cold start. Pass -KeepAlive:$false
+    # to opt out.
+    [bool]$KeepAlive = $true,
+    # Lifecycle markers (detachKeepAlive / Force-killing / cause=) are lost on stderr
+    # under the Claude Code CLI. This file is what get_server_log reads.
+    [string]$LogFile = (Join-Path $env:TEMP 'codesys-mcp-server.log'),
     [string]$McpName = 'codesys-persistent'
 )
 
@@ -119,13 +129,19 @@ Write-Step 'Registering MCP server at user scope...'
 # Remove any pre-existing registration so the new flags take effect.
 claude mcp remove $McpName 2>&1 | Out-Null
 
-claude mcp add -s user $McpName -- codesys-mcp-persistent `
-    --codesys-path $CodesysPath `
-    --codesys-profile $CodesysProfile `
-    --mode persistent `
-    --no-auto-launch `
-    --ready-timeout-ms $ReadyTimeoutMs `
-    --timeout $CommandTimeoutMs
+$mcpArgs = @(
+    '--codesys-path',     $CodesysPath,
+    '--codesys-profile',  $CodesysProfile,
+    '--mode',             'persistent',
+    '--no-auto-launch',
+    '--ready-timeout-ms', $ReadyTimeoutMs,
+    '--timeout',          $CommandTimeoutMs,
+    '--backup-retention', $BackupRetention
+)
+if ($KeepAlive) { $mcpArgs += '--keep-alive' }
+if ($LogFile)   { $mcpArgs += @('--log-file', $LogFile) }
+
+claude mcp add -s user $McpName -- codesys-mcp-persistent @mcpArgs
 
 if ($LASTEXITCODE -ne 0) { Fail 'claude mcp add failed.' }
 
