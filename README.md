@@ -4,6 +4,8 @@ MCP server for CODESYS with a persistent UI instance and file-based IPC.
 
 Unlike headless-only approaches that spawn a new CODESYS process per command, this server launches CODESYS **with its UI visible** and keeps it running. MCP tool calls are sent to the same instance via a file-based IPC watcher, so changes appear in real-time and the user can interact with the IDE alongside AI-driven automation.
 
+> **Setting up on ABB Automation Builder 2.9?** Start with **[docs/SETUP.pdf](docs/SETUP.pdf)** — a 4-page walkthrough (in Italian) from clone to first project opened. [`ONBOARDING.md`](ONBOARDING.md) is the full reference: every flag, extended troubleshooting, upstream sync.
+
 ## Features
 
 - **Persistent mode** - CODESYS UI stays open. Commands execute in the running instance
@@ -11,7 +13,7 @@ Unlike headless-only approaches that spawn a new CODESYS process per command, th
 - **File-based IPC** - proven approach using atomic file writes and a Python watcher script
 - **Command serialization** - async mutex ensures one command at a time
 - **Health monitoring** - detects CODESYS crashes and reports state
-- **40 MCP tools** - project management, POU authoring, structured compiler diagnostics, runtime monitoring, simulation, library management, code search, refactor, device tree, fieldbus I/O mapping, archiving
+- **75 MCP tools** ([full catalog](docs/TOOL-CATALOG.md)) - project management, POU authoring, structured compiler diagnostics, runtime monitoring, simulation, library management, code search, refactor, device tree, fieldbus I/O mapping, archiving
 - **Drop-in replacement** - same MCP tool names and parameters as `@codesys/mcp-toolkit` (the original toolkit's surface is a strict subset)
 
 ## Installation

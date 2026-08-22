@@ -13,6 +13,8 @@ Ultimo aggiornamento: 2026-07-02.
 
 ## Setup nuova macchina
 
+> Se stai configurando la macchina di qualcun altro, o vuoi un file singolo da passare: **[`docs/SETUP.pdf`](docs/SETUP.pdf)** è la stessa procedura in 4 pagine stampabili, senza i dettagli da manutentore. Rigenerabile con `python scripts/gen-setup-pdf.py`.
+
 **Prerequisiti**: Windows + AB 2.9 Standard (o superiore) installato e licenziato + Node.js 18+ + git + Claude Code installato (`claude` su PATH).
 
 Il repo è **pubblico**: non serve autenticazione GitHub né `gh` CLI per clonare.
