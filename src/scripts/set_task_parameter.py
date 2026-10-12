@@ -3,10 +3,12 @@ import sys, scriptengine as script_engine, os, traceback
 TASK_NAME = "{TASK_NAME}"
 # Empty string sentinel = do not touch this knob. Numeric values are passed
 # as their decimal string representation; we parse here.
-CYCLE_TIME_MS_STR     = "{CYCLE_TIME_MS}"
-WATCHDOG_TIME_MS_STR  = "{WATCHDOG_TIME_MS}"
-PRIORITY_STR          = "{PRIORITY}"
-STACK_SIZE_BYTES_STR  = "{STACK_SIZE_BYTES}"
+CYCLE_TIME_MS_STR       = "{CYCLE_TIME_MS}"
+WATCHDOG_TIME_MS_STR    = "{WATCHDOG_TIME_MS}"
+WATCHDOG_ENABLED_STR    = "{WATCHDOG_ENABLED}"
+WATCHDOG_SENSITIVITY_STR = "{WATCHDOG_SENSITIVITY}"
+PRIORITY_STR            = "{PRIORITY}"
+STACK_SIZE_BYTES_STR    = "{STACK_SIZE_BYTES}"
 
 def _maybe_int(s):
     if s is None or s == "":
@@ -15,6 +17,11 @@ def _maybe_int(s):
         return int(s)
     except Exception:
         return None
+
+def _maybe_bool(s):
+    if s is None or s == "":
+        return None
+    return unicode(s).strip().lower() in (u'true', u'1', u'yes', u'on')
 
 def _ms_to_timespan(ms):
     """Construct a System.TimeSpan from milliseconds. IronPython gives us .NET
@@ -27,30 +34,158 @@ def _ms_to_timespan(ms):
         # accept the implicit conversion, or fail with a helpful error.
         return float(ms)
 
-def _cycle_value_for(task_obj, attr, ms):
-    """Pick the representation the task's cycle attribute actually wants.
+def _iec_time_to_ms(s):
+    """Parse an IEC 61131-3 TIME literal ('t#10ms', 'T#1m30s') to ms.
+    Returns None if it does not parse. Mirrors the parser in
+    get_task_configuration.py -- keep the two in step."""
+    import re as _re
+    try:
+        txt = unicode(s).strip().lower()
+    except Exception:
+        return None
+    if txt.startswith('time#'):
+        txt = txt[5:]
+    elif txt.startswith('t#'):
+        txt = txt[2:]
+    else:
+        return None
+    txt = txt.replace('_', '')
+    # Order matters: 'ms'/'us'/'ns' must match before 'm'/'s'.
+    factors = {'ms': 1.0, 'us': 0.001, 'ns': 0.000001,
+               'd': 86400000.0, 'h': 3600000.0, 'm': 60000.0, 's': 1000.0}
+    total = 0.0
+    matched = False
+    pos = 0
+    for m in _re.finditer(r'(\d+(?:\.\d+)?)(ms|us|ns|d|h|m|s)', txt):
+        total += float(m.group(1)) * factors[m.group(2)]
+        matched = True
+        pos = m.end()
+    if not matched or pos != len(txt):
+        return None
+    return total
+
+def _any_time_to_ms(v):
+    """Coerce whatever a time-valued attribute holds (.NET TimeSpan, IEC TIME
+    literal string, plain numeric) into milliseconds. None if unreadable."""
+    if v is None:
+        return None
+    for attr in ('TotalMilliseconds', 'total_milliseconds', 'total_ms'):
+        if hasattr(v, attr):
+            try:
+                return float(getattr(v, attr))
+            except Exception:
+                pass
+    iec = _iec_time_to_ms(v)
+    if iec is not None:
+        return iec
+    try:
+        return float(v)
+    except Exception:
+        return None
+
+def _time_value_for(obj, attr, ms):
+    """Pick the representation a time-valued attribute actually wants.
 
     Empirical on AC500 V3 (2026-06-12, PIOPO brief): `task.interval` is a
     PLAIN STRING holding an IEC TIME literal ('t#10ms'), with a sibling
     `interval_unit` ('ms'). Assigning a System.TimeSpan there 'succeeds'
-    (string property accepts the coerced ToString) but the task keeps its
-    old cycle -- a silent no-op that read back as null. So: if the current
-    value is a string, write an IEC literal; otherwise keep the TimeSpan
-    path for builds whose attribute is a real TimeSpan.
+    (the string property accepts the coerced ToString) but the task keeps
+    its old value -- a silent no-op. So: if the current value is a string,
+    write an IEC literal; otherwise use the TimeSpan path for builds whose
+    attribute is a real TimeSpan.
+
+    2026-10-12: the watchdog time has the same shape and was still on the
+    unconditional-TimeSpan path, so watchdogTimeMs was a silent no-op that
+    reported success -- a bench program ran with a 20ms watchdog and the PLC
+    threw an exception on the first blocking call. Hence this helper is now
+    shared by every time-valued write in this script.
     """
     try:
-        cur = getattr(task_obj, attr)
+        cur = getattr(obj, attr)
     except Exception:
         cur = None
     if isinstance(cur, (str, unicode)):
         return u't#%dms' % int(ms)
     return _ms_to_timespan(ms)
 
+def _write_time_verified(get_owner, attr, ms, field_label):
+    """Write a time value and PROVE it stuck.
+
+    `get_owner` is a callable returning the object holding `attr`; it is
+    re-invoked for the read-back so a stale proxy cannot mask a failed write
+    (some CODESYS wrappers hand out a fresh object per property access).
+
+    Comparison is done in milliseconds, so it holds whether the attribute is
+    a TimeSpan, an IEC literal or a numeric. An unreadable read-back counts
+    as a FAILURE: if the value cannot be proven, success must not be claimed.
+
+    Returns (ok, detail_dict).
+    """
+    owner = get_owner()
+    if owner is None:
+        return False, {'field': field_label, 'reason': 'owner_not_found'}
+    try:
+        new_val = _time_value_for(owner, attr, ms)
+        setattr(owner, attr, new_val)
+    except Exception as e:
+        return False, {'field': field_label, 'attribute': attr, 'error': str(e)}
+
+    owner2 = get_owner()
+    readback = None
+    try:
+        readback = getattr(owner2, attr) if owner2 is not None else None
+    except Exception:
+        pass
+    rb_ms = _any_time_to_ms(readback)
+    try:
+        rb_str = unicode(readback) if readback is not None else None
+    except Exception:
+        rb_str = None
+
+    if rb_ms is None:
+        return False, {'field': field_label, 'attribute': attr,
+                       'error': 'write could not be verified: read back %r '
+                                '(unparseable as a time value)' % rb_str}
+    if abs(rb_ms - float(ms)) > 0.5:
+        return False, {'field': field_label, 'attribute': attr,
+                       'error': 'write did not stick: wrote %s, read back %s '
+                                '(%.0f ms)' % (unicode(new_val), rb_str, rb_ms)}
+    return True, {'field': field_label, 'attribute': attr, 'value': ms,
+                  'written': unicode(new_val), 'readback_ms': rb_ms}
+
+def _write_scalar_verified(get_owner, attr, value, field_label, coerce):
+    """Write a non-time scalar (bool/int) and read it back. Same contract as
+    _write_time_verified: unverifiable means failed."""
+    owner = get_owner()
+    if owner is None:
+        return False, {'field': field_label, 'reason': 'owner_not_found'}
+    try:
+        setattr(owner, attr, value)
+    except Exception as e:
+        return False, {'field': field_label, 'attribute': attr, 'error': str(e)}
+    owner2 = get_owner()
+    readback = None
+    try:
+        readback = getattr(owner2, attr) if owner2 is not None else None
+    except Exception:
+        pass
+    try:
+        rb = coerce(readback)
+    except Exception:
+        rb = None
+    if rb is None or rb != value:
+        return False, {'field': field_label, 'attribute': attr,
+                       'error': 'write did not stick: wrote %r, read back %r'
+                                % (value, readback)}
+    return True, {'field': field_label, 'attribute': attr, 'value': value}
+
 try:
     print("DEBUG: set_task_parameter: Project='%s' Task='%s' "
-          "cycleMs=%s watchdogMs=%s priority=%s stackBytes=%s" % (
+          "cycleMs=%s watchdogMs=%s watchdogEnabled=%s watchdogSens=%s "
+          "priority=%s stackBytes=%s" % (
         PROJECT_FILE_PATH, TASK_NAME,
-        CYCLE_TIME_MS_STR, WATCHDOG_TIME_MS_STR, PRIORITY_STR, STACK_SIZE_BYTES_STR))
+        CYCLE_TIME_MS_STR, WATCHDOG_TIME_MS_STR, WATCHDOG_ENABLED_STR,
+        WATCHDOG_SENSITIVITY_STR, PRIORITY_STR, STACK_SIZE_BYTES_STR))
     primary_project = ensure_project_open(PROJECT_FILE_PATH)
     if not TASK_NAME:
         print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
@@ -58,14 +193,17 @@ try:
 
     cycle_ms    = _maybe_int(CYCLE_TIME_MS_STR)
     watchdog_ms = _maybe_int(WATCHDOG_TIME_MS_STR)
+    watchdog_on = _maybe_bool(WATCHDOG_ENABLED_STR)
+    watchdog_sens = _maybe_int(WATCHDOG_SENSITIVITY_STR)
     priority    = _maybe_int(PRIORITY_STR)
     stack_bytes = _maybe_int(STACK_SIZE_BYTES_STR)
 
-    if cycle_ms is None and watchdog_ms is None and priority is None and stack_bytes is None:
+    if (cycle_ms is None and watchdog_ms is None and watchdog_on is None
+            and watchdog_sens is None and priority is None and stack_bytes is None):
         print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise ValueError(
-            "At least one of cycleTimeMs / watchdogTimeMs / priority / "
-            "stackSizeBytes must be provided.")
+            "At least one of cycleTimeMs / watchdogTimeMs / watchdogEnabled / "
+            "watchdogSensitivity / priority / stackSizeBytes must be provided.")
 
     # Locate the named Task. Walk every Task Configuration node, then look for
     # a child matching TASK_NAME (case-insensitive). Same normalization as
@@ -154,30 +292,12 @@ try:
         if target_attr is None:
             skipped.append({'field': 'cycle_time_ms', 'reason': 'attribute_not_found'})
         else:
-            try:
-                new_val = _cycle_value_for(task_obj, target_attr, cycle_ms)
-                setattr(task_obj, target_attr, new_val)
-                # Verify: read back and compare. The old TimeSpan write
-                # 'succeeded' while changing nothing -- never trust a bare
-                # setattr on these proxies.
-                readback = None
-                try:
-                    readback = getattr(task_obj, target_attr)
-                except Exception:
-                    pass
-                rb_str = None
-                try:
-                    rb_str = unicode(readback) if readback is not None else None
-                except Exception:
-                    pass
-                if isinstance(new_val, (str, unicode)) and rb_str is not None and rb_str.lower() != new_val.lower():
-                    skipped.append({'field': 'cycle_time_ms', 'attribute': target_attr,
-                                    'error': 'write did not stick: wrote %r, read back %r' % (new_val, rb_str)})
-                else:
-                    applied.append({'field': 'cycle_time_ms', 'attribute': target_attr,
-                                    'value': cycle_ms, 'written': unicode(new_val), 'readback': rb_str})
-            except Exception as e:
-                skipped.append({'field': 'cycle_time_ms', 'attribute': target_attr, 'error': str(e)})
+            # Verification is now in ms, so it covers the TimeSpan path too --
+            # previously only a string write was checked and a TimeSpan write
+            # was taken on trust.
+            ok, detail = _write_time_verified(
+                lambda: task_obj, target_attr, cycle_ms, 'cycle_time_ms')
+            (applied if ok else skipped).append(detail)
 
     # priority
     if priority is not None:
@@ -190,40 +310,84 @@ try:
         else:
             skipped.append({'field': 'priority', 'reason': 'attribute_not_found'})
 
-    # watchdog
-    if watchdog_ms is not None:
-        wd = None
-        for a in ('watchdog',):
-            if hasattr(task_obj, a):
-                try:
-                    wd = getattr(task_obj, a)
-                    break
-                except Exception:
-                    pass
-        if wd is None:
-            skipped.append({'field': 'watchdog_time_ms', 'reason': 'watchdog_object_not_found'})
+    # watchdog (time / enabled / sensitivity)
+    #
+    # Re-fetch task_obj.watchdog for every access instead of caching it: if the
+    # wrapper hands back a fresh object per property read, writing to a cached
+    # one would be discarded and a cached read-back would still show the value
+    # we just wrote. _get_wd is passed as the owner-getter so the verification
+    # genuinely round-trips through the project.
+    def _get_wd():
+        try:
+            return getattr(task_obj, 'watchdog', None)
+        except Exception:
+            return None
+
+    if watchdog_ms is not None or watchdog_on is not None or watchdog_sens is not None:
+        wd_probe = _get_wd()
+        if wd_probe is None:
+            for f in ('watchdog_time_ms', 'watchdog_enabled', 'watchdog_sensitivity'):
+                skipped.append({'field': f, 'reason': 'watchdog_object_not_found'})
         else:
-            wd_target = None
-            for a in ('time', 'watchdog_time'):
-                if hasattr(wd, a):
-                    wd_target = a
-                    break
-            if wd_target is None:
-                skipped.append({'field': 'watchdog_time_ms', 'reason': 'attribute_not_found_on_watchdog'})
-            else:
-                try:
-                    setattr(wd, wd_target, _ms_to_timespan(watchdog_ms))
-                    # Also enable the watchdog if there's an explicit toggle.
-                    for ea in ('enable', 'enabled'):
-                        if hasattr(wd, ea):
-                            try:
-                                setattr(wd, ea, True)
-                            except Exception:
-                                pass
-                            break
-                    applied.append({'field': 'watchdog_time_ms', 'attribute': 'watchdog.' + wd_target, 'value': watchdog_ms})
-                except Exception as e:
-                    skipped.append({'field': 'watchdog_time_ms', 'error': str(e)})
+            # Order matters: set the time BEFORE toggling enable, so a task is
+            # never briefly armed with the old (possibly far too short) timeout.
+            if watchdog_ms is not None:
+                wd_target = None
+                for a in ('time', 'watchdog_time'):
+                    if hasattr(wd_probe, a):
+                        wd_target = a
+                        break
+                if wd_target is None:
+                    skipped.append({'field': 'watchdog_time_ms',
+                                    'reason': 'attribute_not_found_on_watchdog'})
+                else:
+                    ok, detail = _write_time_verified(
+                        _get_wd, wd_target, watchdog_ms, 'watchdog_time_ms')
+                    detail['attribute'] = 'watchdog.' + detail.get('attribute', wd_target)
+                    (applied if ok else skipped).append(detail)
+
+            if watchdog_sens is not None:
+                sens_attr = None
+                for a in ('sensitivity', 'watchdog_sensitivity'):
+                    if hasattr(wd_probe, a):
+                        sens_attr = a
+                        break
+                if sens_attr is None:
+                    skipped.append({'field': 'watchdog_sensitivity',
+                                    'reason': 'attribute_not_found_on_watchdog'})
+                else:
+                    ok, detail = _write_scalar_verified(
+                        _get_wd, sens_attr, watchdog_sens, 'watchdog_sensitivity', int)
+                    detail['attribute'] = 'watchdog.' + detail.get('attribute', sens_attr)
+                    (applied if ok else skipped).append(detail)
+
+            # An explicit watchdogEnabled always wins. Otherwise setting a time
+            # implies arming the watchdog -- the long-standing behaviour, kept
+            # so existing callers do not silently change meaning.
+            want_enabled = watchdog_on
+            implicit = False
+            if want_enabled is None and watchdog_ms is not None:
+                want_enabled = True
+                implicit = True
+            if want_enabled is not None:
+                en_attr = None
+                for a in ('enable', 'enabled'):
+                    if hasattr(wd_probe, a):
+                        en_attr = a
+                        break
+                if en_attr is None:
+                    # Only a problem if the caller asked for it explicitly.
+                    if not implicit:
+                        skipped.append({'field': 'watchdog_enabled',
+                                        'reason': 'attribute_not_found_on_watchdog'})
+                else:
+                    ok, detail = _write_scalar_verified(
+                        _get_wd, en_attr, bool(want_enabled), 'watchdog_enabled', bool)
+                    detail['attribute'] = 'watchdog.' + detail.get('attribute', en_attr)
+                    if implicit:
+                        detail['implicit'] = 'enabled because watchdogTimeMs was set'
+                    if ok or not implicit:
+                        (applied if ok else skipped).append(detail)
 
     # stack size: try the task first (rare), then walk up to the Device parent.
     if stack_bytes is not None:
@@ -288,6 +452,26 @@ try:
         print("Skipped/failed: %d field(s)" % len(skipped))
         for s in skipped:
             print("  - %s" % s)
+
+    # A requested knob that did not take must FAIL the call. Reporting success
+    # with the failure buried in a 'skipped' line is how a 20ms watchdog
+    # reached a PLC while the tool said "Task updated (cycleTimeMs,
+    # watchdogTimeMs)" (2026-10-12). Fields that DID apply are already saved
+    # above -- the error says which, so the caller knows the real state.
+    if skipped:
+        print("SCRIPT_ERROR_CODE: ERR_WRITE_DID_NOT_STICK")
+        raise RuntimeError(
+            "Task '%s': %d field(s) applied and saved (%s), but %d requested "
+            "field(s) did NOT take: %s. The project reflects only the applied "
+            "fields -- re-read with get_task_configuration and set the rest in "
+            "the AB task editor if the attribute is not scriptable on this build."
+            % (TASK_NAME,
+               len(applied), ', '.join(a.get('field', '?') for a in applied) or 'none',
+               len(skipped), '; '.join(
+                   '%s (%s)' % (s.get('field', '?'),
+                                s.get('error') or s.get('reason') or 'unknown')
+                   for s in skipped)))
+
     print("SCRIPT_SUCCESS: Task parameters updated.")
     sys.exit(0)
 except Exception as e:

@@ -134,6 +134,7 @@ async function fileExists(filePath: string): Promise<boolean> {
  * roughly chronological. Each entry maps a short stable ID to a description.
  */
 const MCP_PATCHES: Array<{ id: string; description: string }> = [
+  { id: 'task-watchdog-literal-and-readback', description: 'set_task_parameter: watchdogTimeMs was a SILENT NO-OP on AC500 V3 reported as success -- the same IEC-TIME-literal defect already fixed for the cycle time in task-cycle-iec-time-literal, except the watchdog branch still did an unconditional setattr(wd, time, TimeSpan) with NO read-back. Field consequence (2026-10-12, AB 2.9 SP19 Premium, PM5032-T-ETH): a call setting cycleTimeMs=20 + watchdogTimeMs=5000 answered "Task updated (cycleTimeMs, watchdogTimeMs)" while the watchdog stayed at 20ms; on the PLC it tripped at the first blocking NBS.ResolveHostname and had to be disabled by hand in the AB task editor. Fixes: (1) the literal-vs-TimeSpan choice and the read-back are now one shared helper used by EVERY time-valued write; (2) verification compares MILLISECONDS, which also closes a hole where the cycle-time TimeSpan path was never verified at all (only the string path was) and an unreadable read-back now counts as failure instead of silent success; (3) the watchdog owner is re-fetched for the read-back so a per-access wrapper cannot mask a dropped write; (4) a requested knob that did not take now FAILS the call with ERR_WRITE_DID_NOT_STICK naming applied vs failed fields, instead of a SCRIPT_SUCCESS with the failure buried in a "skipped" line. New knobs watchdogEnabled (disable the watchdog for tasks that legitimately block -- previously GUI-only) and watchdogSensitivity. Time is written before the enable toggle so a task is never briefly armed with the old timeout. Static-verified (IEC parser agrees with the reader on 20 cases; write-back simulated against string/dead/TimeSpan attribute shapes) -- NOT yet re-tested on a PLC.' },
   { id: 'online-executor-fallback-UNVERIFIED', description: '⚠️ UNVERIFIED ON AB2.9/SP19 (2026-06-29). Ported from luke-harriman/Codesys-MCP a063aad (verified there on CODESYS V3 SP16, ifm hardware -- different vendor+SP than ours). Root cause: create_online_application and every scriptengine.online op raise "Stack empty" from IPC-driven scripts because the IDE-internal _executionStack only populates via the executor Executing event, which IPC bypasses -- independently diagnosed by both projects. Fix: reflect into scriptengine.online._executor and route calls through its ExecuteSource(source), which fires Executing/Executed. with_executor() wraps connect_to_device/download_to_device/start_stop_application/get_application_state/read_variable/write_variable/monitor_variables. Degrades to a direct call (today\'s behavior, same error) if reflection fails on this build -- cannot regress. write_variable also switched to the canonical set_prepared_value+force_prepared_values (write_value/write don\'t exist on IScriptOnlineApplication SP14+), with a legacy fallback. Needs an on-PLC test against AB2.9/AC500 before the "online is dead" framing elsewhere in the skill/docs is revised.' },
   { id: 'online-tools-latent-nameerror-fix', description: 'connect_to_device and download_to_device called safe_online_login() (defined in _text_utils.py) without _text_utils in their helpers array -- a latent NameError that never surfaced because execution always failed earlier at the Stack-empty error. Found 2026-06-29 while porting the executor fallback (which can let execution reach login() for the first time). Fixed by adding _text_utils to both.' },
   { id: 'resolve-device-address-UNVERIFIED', description: '⚠️ UNVERIFIED on this build. resolve_device_address() (ensure_online_connection.py) converts the raw-IP gateway address to the Network/Block-Driver node-address form V3 login actually routes by (scan-and-resolve), fixing a possible "Network error: No route to host" even when the IP is reachable. Called best-effort after set_gateway_and_address in connect_to_device; a None return leaves prior behavior unchanged. Ported from a063aad.' },
@@ -146,7 +147,7 @@ const MCP_PATCHES: Array<{ id: string; description: string }> = [
   { id: 'get-object-code-tool', description: 'New get_object_code tool: reads the declaration + implementation of a SINGLE POU/DUT/GVL/Method/Property by path (surgical "read the minimum"), instead of get_all_pou_code dumping the whole project. Wraps the existing get_pou_code script that was previously only reachable as a Resource (agents call tools, not resources). DKIT 2026-06-29 Gap 2; also mitigates the dead offline-XML branch on builds without PLCopen export.' },
   { id: 'adopt-live-probe', description: 'launch_codesys adoption hardened: before adopting an existing session dir, send a no-op command and require a real reply (a stale dir from a crashed/exited watcher, or a hand-launched GUI being closed, leaves ready.signal behind but answers nothing). On no reply, abandon adoption and cold-start. launch_codesys also now verifies the launcher reached state=ready before reporting success, and returns the real state + force_reset_watcher hint otherwise (was: "launched successfully" then permanent launching/PID:N/A stall). DKIT 2026-06-29 Gap 3.' },
   { id: 'export-plcopen-probe-and-attach-edition-hint', description: 'export_project_to_plcopen_xml probes more export method names (export_plcopenxml / export_xml / ExportPLCopenXML / export_native / export) before ERR_API_NOT_EXPOSED, and its error now points at get_object_code/get_all_pou_code as the read path when the build has no PLCopen export. attach_codesys step-1 message now leads with the PREMIUM-only requirement (Execute Script File menu is absent on Standard). DKIT 2026-06-29 Gap 1 + Gap 4.' },
-  { id: 'setter-readback-verification', description: 'Close the recurring "lying success" failure mode (a setter accepts a .NET write without raising but it silently does not stick, only discovered later on the running PLC). Six setters now read the value back after writing and FAIL LOUDLY on mismatch instead of reporting false success: set_library_parameter (slot.value), reset_library_parameter (slot reverts to default), map_io_channel (binding stuck / cleared), set_library_reference_version (version resolved, with a "*" floating carve-out), rename_object (name normalization/collision), set_project_info (per-field, mismatch -> skipped not applied). New error codes ERR_WRITE_DID_NOT_STICK / ERR_RESET_DID_NOT_STICK / ERR_RENAME_DID_NOT_STICK. set_task_parameter and set_device_parameter already verified. 2026-06-29 audit follow-up.' },
+  { id: 'setter-readback-verification', description: 'Close the recurring "lying success" failure mode (a setter accepts a .NET write without raising but it silently does not stick, only discovered later on the running PLC). Six setters now read the value back after writing and FAIL LOUDLY on mismatch instead of reporting false success: set_library_parameter (slot.value), reset_library_parameter (slot reverts to default), map_io_channel (binding stuck / cleared), set_library_reference_version (version resolved, with a "*" floating carve-out), rename_object (name normalization/collision), set_project_info (per-field, mismatch -> skipped not applied). New error codes ERR_WRITE_DID_NOT_STICK / ERR_RESET_DID_NOT_STICK / ERR_RENAME_DID_NOT_STICK. set_device_parameter already verified. (This entry originally claimed set_task_parameter was verified too; that was only half true -- its cycle-time string path was, while the TimeSpan path and the whole watchdog branch were not. Corrected 2026-10-12, see task-watchdog-literal-and-readback.) 2026-06-29 audit follow-up.' },
   { id: 'backup-retention-dedup', description: 'BackupManager no longer leaves an unbounded pile of <file>.backup-* clutter. (1) DEDUP: skips the snapshot when the source is byte-identical to the newest existing backup (read-back-verified sets, repeated no-op edits). (2) RETENTION: after each snapshot, prunes that file\'s auto-backups to the newest N (CLI --backup-retention, default 5; 0 = unbounded). (3) New cleanup_backups tool sweeps existing piles from older sessions. ONLY files matching the exact <basename>.backup-<TS>Z pattern are ever deleted -- manual <name>.backup and unrelated files are never touched. NEXO/Admin feedback 2026-06-12.' },
   { id: 'task-cycle-iec-time-literal', description: 'set_task_parameter/get_task_configuration: on AC500 V3 the task `interval` attribute is a PLAIN STRING holding an IEC TIME literal ("t#10ms"), not a TimeSpan. The old write assigned a TimeSpan (silent no-op reported as success: PLC kept running at 10ms); the old read expected TimeSpan and returned null. Now: write emits "t#<N>ms" when the current value is a string (TimeSpan kept for builds where it is real), with a read-back verification that fails loudly if the write did not stick; read parses IEC TIME literals (t#/time#, d/h/m/s/ms/us/ns components). Field-validated 2026-06-12: set 100 -> readback 100. PIOPO brief.' },
   { id: 'remove-library-tool', description: 'remove_library tool: removes a library REFERENCE from the project Library Manager via ScriptLibManObject.get_libraries(recursive)/remove_library(name) -- works on AB 2.9 where references are not enumerable children (children=0). System #-prefixed references refused. Field-validated 2026-06-12 on an AC500 V3 consumer (reference removed, compile clean). PIOPO brief Gap 1.' },
@@ -2612,12 +2613,14 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   s.tool(
     'set_task_parameter',
-    "Updates one or more properties of a Task (cycle time, priority, watchdog time, stack size). Pass only the knobs you want to change; others are left untouched. Saves the project after applying. For AC500 V3 stack size: when set at task level fails, the script walks up to ancestor nodes; AC500 may store PLC stack config via Device parameter dict instead -- in that case use set_device_parameter once the parameter id is known (set_device_parameter does NOT auto-discover it; consult AB UI Device > PLC Settings).",
+    "Updates one or more properties of a Task (cycle time, priority, watchdog time/enable/sensitivity, stack size). Pass only the knobs you want to change; others are left untouched. Every write is read back and the call FAILS (ERR_WRITE_DID_NOT_STICK) if a requested field did not take -- fields that did apply are still saved, and the error names both sets. For AC500 V3 stack size: when set at task level fails, the script walks up to ancestor nodes; AC500 may store PLC stack config via Device parameter dict instead -- in that case use set_device_parameter once the parameter id is known (set_device_parameter does NOT auto-discover it; consult AB UI Device > PLC Settings).",
     {
       projectFilePath: z.string().describe("Path to the project file."),
       taskName: z.string().min(1).describe("Exact name of the task as shown under Task Configuration (e.g. 'MainTask'). Use get_task_configuration to discover."),
       cycleTimeMs: z.number().int().positive().describe("Cycle time / interval in milliseconds.").optional(),
-      watchdogTimeMs: z.number().int().positive().describe("Watchdog timeout in milliseconds. Setting it also enables the watchdog if a toggle is exposed.").optional(),
+      watchdogTimeMs: z.number().int().positive().describe("Watchdog timeout in milliseconds. Also arms the watchdog unless watchdogEnabled is passed explicitly. NOTE: the watchdog measures EXECUTION time per cycle, not the cycle period.").optional(),
+      watchdogEnabled: z.boolean().describe("Arm (true) or disable (false) the task watchdog. Pass false when the task makes blocking calls that legitimately exceed the timeout -- e.g. NBS.ResolveHostname on a bench program -- instead of disabling it by hand in the AB task editor. Overrides the implicit arming done by watchdogTimeMs.").optional(),
+      watchdogSensitivity: z.number().int().positive().describe("Watchdog sensitivity: the number of consecutive cycles that must exceed the timeout before the watchdog trips (AC500 V3 default 1).").optional(),
       priority: z.number().int().min(0).max(31).describe("Task priority (0 = highest, 31 = lowest on AC500 V3).").optional(),
       stackSizeBytes: z.number().int().positive().describe("Stack size in bytes. Required when a library has large STRING(N) buffers that overflow the default ~128KB stack; common bump is 262144 (256KB).").optional(),
     },
@@ -2626,18 +2629,22 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       taskName: string;
       cycleTimeMs?: number;
       watchdogTimeMs?: number;
+      watchdogEnabled?: boolean;
+      watchdogSensitivity?: number;
       priority?: number;
       stackSizeBytes?: number;
     }) => {
       const provided = [
         args.cycleTimeMs !== undefined ? 'cycleTimeMs' : '',
         args.watchdogTimeMs !== undefined ? 'watchdogTimeMs' : '',
+        args.watchdogEnabled !== undefined ? 'watchdogEnabled' : '',
+        args.watchdogSensitivity !== undefined ? 'watchdogSensitivity' : '',
         args.priority !== undefined ? 'priority' : '',
         args.stackSizeBytes !== undefined ? 'stackSizeBytes' : '',
       ].filter(Boolean);
       if (provided.length === 0) {
         return {
-          content: [{ type: 'text' as const, text: 'Error: at least one of cycleTimeMs / watchdogTimeMs / priority / stackSizeBytes must be provided.' }],
+          content: [{ type: 'text' as const, text: 'Error: at least one of cycleTimeMs / watchdogTimeMs / watchdogEnabled / watchdogSensitivity / priority / stackSizeBytes must be provided.' }],
           isError: true,
         };
       }
@@ -2649,6 +2656,8 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
           TASK_NAME: args.taskName.trim(),
           CYCLE_TIME_MS: args.cycleTimeMs !== undefined ? String(args.cycleTimeMs) : '',
           WATCHDOG_TIME_MS: args.watchdogTimeMs !== undefined ? String(args.watchdogTimeMs) : '',
+          WATCHDOG_ENABLED: args.watchdogEnabled !== undefined ? String(args.watchdogEnabled) : '',
+          WATCHDOG_SENSITIVITY: args.watchdogSensitivity !== undefined ? String(args.watchdogSensitivity) : '',
           PRIORITY: args.priority !== undefined ? String(args.priority) : '',
           STACK_SIZE_BYTES: args.stackSizeBytes !== undefined ? String(args.stackSizeBytes) : '',
         },
@@ -2656,6 +2665,10 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       );
       await backupManager.snapshot(escaped);
       const result = await executor.executeScript(script);
+      // The headline only claims the requested knobs because the script now
+      // hard-fails when any of them did not take -- on success, requested ==
+      // applied. Previously this line asserted every knob was updated even
+      // when the script had quietly skipped one.
       return formatToolResponse(
         result,
         `Task '${args.taskName}' updated (${provided.join(', ')}) in ${args.projectFilePath}.`
