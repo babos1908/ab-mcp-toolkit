@@ -112,6 +112,45 @@ def to_codesys_text(value):
         return value.decode('utf-8', 'replace')
 
 
+def opt_placeholder(value, name=None):
+    """Normalise a template placeholder the TS layer did not substitute.
+
+    ScriptManager.interpolate only replaces {KEY} for keys the tool handler
+    actually passed; an unknown placeholder is left VERBATIM in the generated
+    source. The scripts in src/scripts are template-side (re-read from disk on
+    every call) while the tool handlers live in the server process, so after a
+    build the new script can run against the old handler until Claude Code is
+    restarted -- any placeholder added in that window arrives as the literal
+    string "{NAME}".
+
+    That literal is non-empty, so a naive "is it empty?" check reads it as a
+    REAL value. It bit for real on 2026-10-12: a new WATCHDOG_ENABLED
+    placeholder reached set_task_parameter as "{WATCHDOG_ENABLED}", was parsed
+    as an explicit false, and DISABLED a task watchdog that the caller had
+    asked to arm -- failing toward the unsafe side, silently.
+
+    Returns '' (= not provided, fall back to prior behaviour) for an
+    unsubstituted placeholder, and warns so the version skew is visible
+    instead of looking like a deliberate value. Otherwise returns the value
+    unchanged.
+    """
+    try:
+        txt = value if isinstance(value, (str, unicode)) else unicode(value)
+    except Exception:
+        return value
+    stripped = txt.strip()
+    if (len(stripped) > 2 and stripped.startswith('{') and stripped.endswith('}')
+            and ' ' not in stripped):
+        inner = stripped[1:-1]
+        if inner and inner.replace('_', '').replace(':', '').isalnum() and inner.upper() == inner:
+            print("WARN: placeholder %s was not substituted by the tool handler "
+                  "-- treating it as 'not provided'. This means the running MCP "
+                  "server is older than this script (restart Claude Code to pick "
+                  "up the new tool parameters)." % (name or stripped))
+            return ''
+    return value
+
+
 def safe_online_login(online_app, change_option=None):
     """Call online_app.login(...) with the right signature for the current
     CODESYS build.

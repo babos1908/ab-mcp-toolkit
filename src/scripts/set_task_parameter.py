@@ -11,6 +11,7 @@ PRIORITY_STR            = "{PRIORITY}"
 STACK_SIZE_BYTES_STR    = "{STACK_SIZE_BYTES}"
 
 def _maybe_int(s):
+    s = opt_placeholder(s)
     if s is None or s == "":
         return None
     try:
@@ -19,9 +20,20 @@ def _maybe_int(s):
         return None
 
 def _maybe_bool(s):
+    """Strict: only recognised boolean tokens count. Anything unrecognised is
+    'not provided' (None), never a silent False -- for a knob that arms or
+    disarms a watchdog, guessing toward 'disabled' is the dangerous direction.
+    opt_placeholder additionally catches an unsubstituted "{NAME}" arriving
+    from an older tool handler."""
+    s = opt_placeholder(s)
     if s is None or s == "":
         return None
-    return unicode(s).strip().lower() in (u'true', u'1', u'yes', u'on')
+    txt = unicode(s).strip().lower()
+    if txt in (u'true', u'1', u'yes', u'on'):
+        return True
+    if txt in (u'false', u'0', u'no', u'off'):
+        return False
+    return None
 
 def _ms_to_timespan(ms):
     """Construct a System.TimeSpan from milliseconds. IronPython gives us .NET
