@@ -47,9 +47,15 @@ Both designed from live probes (separate headless AB, temporary copy of an AC500
 - **Live-verified** with the real scripts in a headless AB (temp copy of the project, throw-away library): the repository list shows titles, versions, display strings and file paths with 0 nameless entries out of 381; a library installed with `install_library_to_repository` was removed by `uninstall_library_from_repository` and confirmed gone; `#MProtocol` redirected 1.0.0 -> 0.1.4; a redirect to 9.9.9 refused with nothing written; `AC500-V3-utilities-ip` 1.0.2 -> 1.0.1 with its namespace and `qualified_only` restored, then -> `*` resolving to 1.0.2; a fresh AB process read both changes back from disk.
 - The fake scriptengine now has the live repository and reference shapes (title-only entries, `find_library` with `*` and `None`, repository-first `uninstall_library`, read-only `managed_library`, `set_redirection` accepting a missing version), so the tests could fail for the old code -- and they do: with the previous three scripts, all 14 new tests fail.
 
+### Fixed 2026-10-18: one IEC TIME parser instead of two
+
+- `set_task_parameter` and `get_task_configuration` each carried a copy of the IEC TIME literal parser, kept in step by hand. Both now use `iec_time_literal_to_ms` / `time_value_to_ms` in `_text_utils` (every handler, old ones included, already prepends it). A differential run on AB's Python 2.7 over 37 inputs -- TimeSpans, numbers, unicode, compound and underscored literals, us/ns -- found the two old copies identical everywhere, and the shared version identical to them on 35.
+- The other 2 are a latent bug the copies shared and the unified parser fixes: they only checked that the LAST component ended the literal, so `'t#1msGARBAGE5s'` read as 5001 ms and `'t#5x10ms'` as 10 ms. Components must now cover the literal back to back. That matters most in `set_task_parameter`'s read-back, where a misparse could "verify" a write that did not happen.
+- Live (headless AB, copy of an AC500 V3 project): `get_task_configuration` read the task at 10 ms / watchdog 20 ms; `set_task_parameter` wrote 50 ms and 100 ms and read both back; a fresh AB process read them from disk. The same run disarmed the watchdog (`watchdogEnabled=false`, a real change from armed) and it read back disarmed -- the toggle verification still open from 2026-10-12.
+
 ### Known issues found, not fixed here
 
-- `set_task_parameter` / `get_task_configuration` keep their own copies of the IEC TIME parser.
+- None left from this round.
 
 ## 0.6.2 — 2026-05-09
 

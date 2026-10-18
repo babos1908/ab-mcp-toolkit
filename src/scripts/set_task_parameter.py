@@ -51,54 +51,8 @@ def _ms_to_timespan(ms):
         # accept the implicit conversion, or fail with a helpful error.
         return float(ms)
 
-def _iec_time_to_ms(s):
-    """Parse an IEC 61131-3 TIME literal ('t#10ms', 'T#1m30s') to ms.
-    Returns None if it does not parse. Mirrors the parser in
-    get_task_configuration.py -- keep the two in step."""
-    import re as _re
-    try:
-        txt = unicode(s).strip().lower()
-    except Exception:
-        return None
-    if txt.startswith('time#'):
-        txt = txt[5:]
-    elif txt.startswith('t#'):
-        txt = txt[2:]
-    else:
-        return None
-    txt = txt.replace('_', '')
-    # Order matters: 'ms'/'us'/'ns' must match before 'm'/'s'.
-    factors = {'ms': 1.0, 'us': 0.001, 'ns': 0.000001,
-               'd': 86400000.0, 'h': 3600000.0, 'm': 60000.0, 's': 1000.0}
-    total = 0.0
-    matched = False
-    pos = 0
-    for m in _re.finditer(r'(\d+(?:\.\d+)?)(ms|us|ns|d|h|m|s)', txt):
-        total += float(m.group(1)) * factors[m.group(2)]
-        matched = True
-        pos = m.end()
-    if not matched or pos != len(txt):
-        return None
-    return total
-
-def _any_time_to_ms(v):
-    """Coerce whatever a time-valued attribute holds (.NET TimeSpan, IEC TIME
-    literal string, plain numeric) into milliseconds. None if unreadable."""
-    if v is None:
-        return None
-    for attr in ('TotalMilliseconds', 'total_milliseconds', 'total_ms'):
-        if hasattr(v, attr):
-            try:
-                return float(getattr(v, attr))
-            except Exception:
-                pass
-    iec = _iec_time_to_ms(v)
-    if iec is not None:
-        return iec
-    try:
-        return float(v)
-    except Exception:
-        return None
+# IEC TIME parsing (iec_time_literal_to_ms / time_value_to_ms) lives in
+# _text_utils, shared with get_task_configuration.
 
 def _time_value_for(obj, attr, ms):
     """Pick the representation a time-valued attribute actually wants.
@@ -153,7 +107,7 @@ def _write_time_verified(get_owner, attr, ms, field_label):
         readback = getattr(owner2, attr) if owner2 is not None else None
     except Exception:
         pass
-    rb_ms = _any_time_to_ms(readback)
+    rb_ms = time_value_to_ms(readback)
     try:
         rb_str = unicode(readback) if readback is not None else None
     except Exception:

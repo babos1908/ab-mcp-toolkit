@@ -129,7 +129,7 @@ pwsh dev/check-scripts.ps1
 # Build (cleans dist/, runs tsc, copies scripts/)
 npm run build
 
-# All tests (104 currently; the fake-engine suite needs a CPython 2.7, AB ships one)
+# All tests (107 currently; the fake-engine suite needs a CPython 2.7, AB ships one)
 npm test
 
 # Type check only

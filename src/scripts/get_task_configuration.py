@@ -91,59 +91,6 @@ try:
             "(application + device)."
         )
 
-    def _iec_time_to_ms(s):
-        """Parse an IEC 61131-3 TIME literal ('t#10ms', 'T#1m30s', 'time#1s')
-        to milliseconds (float). Returns None if it doesn't parse. On AC500 V3
-        the task `interval` attribute is exactly such a string (empirical
-        2026-06-12), NOT a TimeSpan."""
-        import re as _re
-        try:
-            txt = unicode(s).strip().lower()
-        except Exception:
-            return None
-        if txt.startswith('time#'):
-            txt = txt[5:]
-        elif txt.startswith('t#'):
-            txt = txt[2:]
-        else:
-            return None
-        txt = txt.replace('_', '')
-        # Order matters: 'ms'/'us'/'ns' must match before 'm'/'s'.
-        factors = (('ms', 1.0), ('us', 0.001), ('ns', 0.000001),
-                   ('d', 86400000.0), ('h', 3600000.0), ('m', 60000.0), ('s', 1000.0))
-        total = 0.0
-        matched = False
-        pos = 0
-        for m in _re.finditer(r'(\d+(?:\.\d+)?)(ms|us|ns|d|h|m|s)', txt):
-            total += float(m.group(1)) * dict(factors)[m.group(2)]
-            matched = True
-            pos = m.end()
-        if not matched or pos != len(txt):
-            return None
-        return total
-
-    def _ts_to_ms(ts):
-        """Convert a task cycle value to milliseconds (float). Handles .NET
-        TimeSpan, IEC TIME literal strings, and plain numerics."""
-        if ts is None:
-            return None
-        # .NET TimeSpan exposes .TotalMilliseconds. IronPython gets it via attr access.
-        for attr in ('TotalMilliseconds', 'total_milliseconds', 'total_ms'):
-            if hasattr(ts, attr):
-                try:
-                    return float(getattr(ts, attr))
-                except Exception:
-                    pass
-        # IEC TIME literal string ('t#10ms') -- the AC500 V3 case.
-        iec = _iec_time_to_ms(ts)
-        if iec is not None:
-            return iec
-        # Fallback: plain numeric.
-        try:
-            return float(ts)
-        except Exception:
-            return None
-
     def _bytes(v):
         if v is None:
             return None
@@ -173,7 +120,7 @@ try:
             if hasattr(task_obj, attr):
                 try:
                     val = getattr(task_obj, attr)
-                    rec[u'cycle_time_ms'] = _ts_to_ms(val)
+                    rec[u'cycle_time_ms'] = time_value_to_ms(val)
                     rec[u'_cycle_time_attr'] = attr
                     break
                 except Exception:
@@ -202,7 +149,7 @@ try:
             for ta in ('time', 'watchdog_time'):
                 if hasattr(wd, ta):
                     try:
-                        wd_rec[u'time_ms'] = _ts_to_ms(getattr(wd, ta))
+                        wd_rec[u'time_ms'] = time_value_to_ms(getattr(wd, ta))
                         break
                     except Exception:
                         pass

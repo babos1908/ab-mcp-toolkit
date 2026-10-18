@@ -572,6 +572,51 @@ def dump():
     });
   });
 
+  // ------------------------------------- IEC TIME values (shared parser, 2026-10-18)
+  // get_task_configuration and set_task_parameter used to carry their own
+  // copies of the parser; both now use _text_utils.time_value_to_ms. The
+  // copies only checked that the LAST component ended the literal, so
+  // 't#1msGARBAGE5s' read as 5001 ms.
+  describe('IEC TIME values', () => {
+    const mainTask = (r: Run) =>
+      r.result.task_configurations[0].tasks.find((t: any) => t.name === 'MainTask');
+
+    it('get_task_configuration reads compound and underscored literals', () => {
+      const r = runFixed('get_task_configuration', {}, WORLD() + `
+t = w['tc'].get_children(False)[0]
+t._interval = 't#1m30s'
+t.watchdog._time = 'T#1H_30M'
+`);
+      expect(ok(r)).toBe(true);
+      expect(mainTask(r).cycle_time_ms).toBe(90000);
+      expect(mainTask(r).watchdog.time_ms).toBe(5400000);
+    });
+
+    it('get_task_configuration reports a malformed literal as null, not as a guess', () => {
+      const r = runFixed('get_task_configuration', {}, WORLD() + `
+w['tc'].get_children(False)[0]._interval = 't#1msGARBAGE5s'
+`);
+      expect(ok(r)).toBe(true);
+      expect(mainTask(r).cycle_time_ms).toBeNull();
+    });
+
+    it('set_task_parameter does not "verify" a write against a misparsed read-back', () => {
+      // AB storing garbage is contrived, but it is exactly the case where the
+      // old lenient parser turned an unverifiable write into a success: it
+      // read 't#1msGARBAGE5s' as 5001 ms and matched the request.
+      const r = runFixed('set_task_parameter', {
+        TASK_NAME: 'MainTask', CYCLE_TIME_MS: '5001', WATCHDOG_TIME_MS: '', WATCHDOG_ENABLED: '',
+        WATCHDOG_SENSITIVITY: '', PRIORITY: '', STACK_SIZE_BYTES: '', CREATE_TASK: 'false',
+        TASK_KIND: '', ADD_POUS: '',
+      }, WORLD() + `
+se.Task.interval = property(se.Task._gi, lambda self, v: setattr(self, '_interval', 't#1msGARBAGE5s'))
+`);
+      expect(ok(r)).toBe(false);
+      expect(r.code).toBe('ERR_WRITE_DID_NOT_STICK');
+      expect(r.output).toContain('could not be verified');
+    });
+  });
+
   // ------------------------------------------------------- #9 inspect_project_tree
   describe('inspect_project_tree', () => {
     it('reports the ImagePool (was dropped) in others with its raw type', () => {

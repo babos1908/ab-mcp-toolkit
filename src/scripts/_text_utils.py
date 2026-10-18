@@ -820,3 +820,70 @@ def installed_versions_of(lib_mgr, title, company=None):
             continue
         hits.append(e['display'])
     return sorted(hits)
+
+
+# ------------------------------------------------------------ IEC TIME values
+#
+# On AC500 V3 a task's interval and its watchdog time are STRINGS holding an
+# IEC 61131-3 TIME literal ('t#10ms'), not .NET TimeSpans (live 2026-06-12 and
+# 2026-10-12). get_task_configuration reads them and set_task_parameter reads
+# its writes back through these two functions; until 2026-10-18 each script
+# carried its own copy, kept in step by hand.
+
+_IEC_TIME_FACTORS = {'ms': 1.0, 'us': 0.001, 'ns': 0.000001,
+                     'd': 86400000.0, 'h': 3600000.0, 'm': 60000.0, 's': 1000.0}
+
+
+def iec_time_literal_to_ms(s):
+    """'t#10ms' / 'T#1m30s' / 'time#1s' / 't#1h_30m' -> milliseconds (float),
+    or None when s is not a well-formed TIME literal.
+
+    The components must cover the whole literal back to back. The copies this
+    replaces only checked that the LAST component ended the string, so
+    't#1msGARBAGE5s' read as 5001 ms instead of being rejected."""
+    import re as _re
+    try:
+        txt = _to_unicode(s).strip().lower()
+    except Exception:
+        return None
+    if txt.startswith(u'time#'):
+        txt = txt[5:]
+    elif txt.startswith(u't#'):
+        txt = txt[2:]
+    else:
+        return None
+    txt = txt.replace(u'_', u'')
+    if not txt:
+        return None
+    total = 0.0
+    pos = 0
+    # 'ms' / 'us' / 'ns' are listed before 'm' / 's' so '10ms' is not '10m' + 's'.
+    for m in _re.finditer(r'(\d+(?:\.\d+)?)(ms|us|ns|d|h|m|s)', txt):
+        if m.start() != pos:
+            return None
+        total += float(m.group(1)) * _IEC_TIME_FACTORS[m.group(2)]
+        pos = m.end()
+    if pos != len(txt):
+        return None
+    return total
+
+
+def time_value_to_ms(v):
+    """Milliseconds (float) from whatever a time-valued attribute holds: a
+    .NET TimeSpan (TotalMilliseconds), an IEC TIME literal string, or a plain
+    number. None when it is none of these."""
+    if v is None:
+        return None
+    for attr in ('TotalMilliseconds', 'total_milliseconds', 'total_ms'):
+        if hasattr(v, attr):
+            try:
+                return float(getattr(v, attr))
+            except Exception:
+                pass
+    iec = iec_time_literal_to_ms(v)
+    if iec is not None:
+        return iec
+    try:
+        return float(v)
+    except Exception:
+        return None
