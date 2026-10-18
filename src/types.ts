@@ -156,6 +156,13 @@ export interface LauncherConfig {
    * this; bump to 300000+ to match the slowest expected operation.
    */
   commandTimeoutMs?: number;
+  /**
+   * Folder holding one IPC sub-folder per AB session. Defaults to
+   * %TEMP%\codesys-mcp-persistent, which every server on the machine shares.
+   * Tests MUST point this elsewhere: adoption probes and cleanup act on
+   * whatever lives here, including other servers' live sessions.
+   */
+  sessionBaseDir?: string;
 }
 
 /** Runtime status of the CODESYS launcher */

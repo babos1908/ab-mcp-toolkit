@@ -144,6 +144,7 @@ async function fileExists(filePath: string): Promise<boolean> {
  * roughly chronological. Each entry maps a short stable ID to a description.
  */
 const MCP_PATCHES: Array<{ id: string; description: string }> = [
+  { id: 'session-ownership-and-safe-cleanup', description: 'Shared-machine incident 2026-10-18: at 18:40:50 the IPC dirs of TWO live AB sessions were deleted from under their watchers (MPLUS IO PID 26312 and PID 13804); every call then failed with ENOENT on commands/<id>.py.tmp, diagnose_mcp_state said "Healthy" with "Heartbeat: never", and the 13804 watcher logged the same error ~16 times a second (8 MB in 40 min). The culprit process could not be attributed (no --log-file configured), but two defects made it possible for one server to break another\'s session: (1) adoptExisting() without a projectFilePath adopted the newest live session whoever was driving it; (2) shutdown() and forceReset() always rm -rf\'d the IPC dir, even when the watcher was alive (kill skipped or failed). Fixes: an owner.json marker per session ({serverPid} while a server drives it, {serverPid:null} after a keep-alive detach); adoption never takes a session owned by another live server (not even probed), and without a project adopts only a released/orphaned session or, for sessions from older servers, an idle one; launch_codesys reports the live sessions it passed over; list_ab_sessions shows ownedBy. The IPC dir is deleted only when its watcher is gone (AB pid exited, or heartbeat missing/older than 30s when the pid is unknown). Self-healing: IpcClient recreates commands/ and results/ before sending, and the watcher (newly launched ones) recreates them instead of failing every 50ms, logging a repeating error once per ~1000 repeats. diagnose_mcp_state reports the folder MISSING and says not to force_reset for it. sessionBaseDir makes the session folder configurable so tests never touch the real one. 12 unit tests; removing the four guards fails exactly the six that test them.' },
   { id: 'iec-time-parser-shared-and-strict', description: 'set_task_parameter and get_task_configuration each carried a copy of the IEC TIME literal parser (AC500 V3 task interval and watchdog time are such strings); both now use _text_utils.iec_time_literal_to_ms / time_value_to_ms. Differential check on AB Python 2.7, 37 inputs: old copies identical to each other everywhere, the shared parser identical to them on 35. The other 2 expose a latent bug the copies shared: only the LAST component had to end the literal, so t#1msGARBAGE5s parsed as 5001 ms -- now components must cover the literal back to back, which matters most for set_task_parameter read-back (a misparse could verify a write that did not happen). Live 2026-10-18 on a copy: read 10/20 ms, wrote and read back 50/100 ms, re-read from a fresh process.' },
   { id: 'reference-version-redirect-or-readd', description: 'set_library_reference_version found no reference on AB 2.9 (it walked lm.get_children(), empty there), then tried set_version() / version=, which do not exist, and reported success even when the save failed. Rewritten on the mechanisms probed live (2026-10-18, temp copy of an AC500 V3 project): a PLACEHOLDER reference\'s version is the project-level redirection -- ref.set_redirection("Title, version (Company)") moves effective_resolution at once and persists; a MANAGED reference\'s managed_library is read-only, so remove_library + add_library at the new version, restoring namespace / qualified_only / optional and re-applying parameter overrides with a read-back. "*" floats to the newest installed version for both. TRAP found by probing: AB ACCEPTS a redirection to a version that is not installed and leaves the reference unresolved (effective_resolution None), so the target is checked with find_library before anything is written (ERR_LIB_NOT_FOUND listing the installed versions). Every change is read back before save_project_checked; one that does not take is rolled back in memory and not saved. System references refused. Live-verified through the real script: #MProtocol 1.0.0 -> 0.1.4; 9.9.9 refused with nothing written; AC500-V3-utilities-ip 1.0.2 -> 1.0.1 with namespace UtilsIP / qualified_only restored; then -> "*" resolving to 1.0.2; a fresh AB process re-read both from disk.' },
   { id: 'library-repository-title-and-uninstall-order', description: 'uninstall_library_from_repository returned ERR_LIB_NOT_FOUND for a library install_library_to_repository had just installed, and list_library_repository reported every entry nameless ("381 scanned, 0 kept"). Live probe on AB 2.9 SP19 (2026-10-18): get_all_libraries() yields ManagedLib objects whose name is .title (no .name / .get_name, which both tools probed; list_library_repository also looked for display_name instead of displayname); find_library("Title, version (Company)") returns (lib, repository) or None, "*" = newest; uninstall_library takes (repository, library) -- the uninstall only ever tried (library, repository). Shared helpers repository_libraries / find_installed_library in _text_utils. Uninstall matches the EXACT title (never a substring), reads every removal back (still installed -> ERR_WRITE_DID_NOT_STICK) and lists the installed versions when nothing matches. Live-verified: list shows titles/versions/display/file paths with 0 nameless of 381; a throw-away library installed with install_library_to_repository was removed by uninstall_library_from_repository and confirmed gone.' },
@@ -360,9 +361,9 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   s.tool(
     'launch_codesys',
-    "Manually launch CODESYS with UI. Use when --no-auto-launch was set. If a still-running AB from a previous keep-alive session is detected, this adopts it (no cold start) instead of spawning a second instance. On a SHARED machine with several agents, pass projectFilePath: adoption then only re-attaches to an AB that already has THAT project open (or none), never another agent's AB running a different project -- see list_ab_sessions.",
+    "Manually launch CODESYS with UI. Use when --no-auto-launch was set. If a still-running AB from a previous keep-alive session is detected, this adopts it (no cold start) instead of spawning a second instance. Adoption NEVER takes an AB that another live MCP server is driving (owner.json marker). Pass projectFilePath to resume YOUR AB that has that project open; without it only a released/orphaned session, or an idle one, is adopted, and the result lists any live session it passed over and why.",
     {
-      projectFilePath: z.string().describe("Optional: the project you intend to work on. Enables the owner-guard so adoption won't grab another agent's AB running a different project.").optional(),
+      projectFilePath: z.string().describe("Optional: the project you intend to work on. Lets adoption resume an AB that already has it open; sessions with another project, or driven by another live server, are never taken.").optional(),
     },
     async (args: { projectFilePath?: string }) => {
       if (!launcher) {
@@ -410,10 +411,18 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         // timeouts trigger auto-recovery via forceReset().
         executor.swapNow(resilientLauncher!);
         executionMode = 'persistent';
+        // When we cold-started although live AB sessions exist, say which and
+        // why they were not taken (owned by another live server, a different
+        // project, ...) -- the caller may have meant to resume one of them.
+        const skips = adopted ? [] : launcher.lastAdoptionSkips;
+        const skipNote = skips.length === 0 ? '' :
+          `\nNote: ${skips.length} live AB session(s) were NOT adopted: ` +
+          skips.map((k) => `${k.sessionId} (${k.reason}${k.projectPath ? `; open: ${k.projectPath}` : ''})`).join('; ') +
+          `. If one of them is yours, call launch_codesys with its projectFilePath to resume it. See list_ab_sessions.`;
         return {
-          content: [{ type: 'text' as const, text: adopted
+          content: [{ type: 'text' as const, text: (adopted
             ? `Adopted the already-running CODESYS instance (no cold start). Persistent mode active. PID ${st.pid ?? 'N/A'}.`
-            : `CODESYS launched successfully in persistent mode. PID ${st.pid ?? 'N/A'}.` }],
+            : `CODESYS launched successfully in persistent mode. PID ${st.pid ?? 'N/A'}.`) + skipNote }],
           isError: false,
         };
       } catch (err) {
@@ -624,6 +633,9 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       lines.push(`Launcher state: ${d.status.state}`);
       lines.push(`Process alive: ${d.isProcessAlive ? 'yes' : 'no'} (PID ${d.status.pid ?? 'N/A'})`);
       lines.push(`Started: ${d.status.startedAt ? new Date(d.status.startedAt).toISOString() : 'N/A'}`);
+      if (d.ipcDirIntact !== null) {
+        lines.push(`IPC session folder: ${d.ipcDirIntact ? 'present' : 'MISSING'} (${d.status.ipcDir ?? 'N/A'})`);
+      }
       if (d.status.heartbeatAgeSeconds === null || d.status.heartbeatAgeSeconds === undefined) {
         lines.push(`Heartbeat: never (no heartbeat.signal exists)`);
       } else {

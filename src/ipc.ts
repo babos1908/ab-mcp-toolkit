@@ -205,6 +205,15 @@ export class IpcClient {
 
     ipcLog.debug(`Sending command ${requestId}`);
 
+    // Self-heal a session dir deleted from under a live watcher (2026-10-18:
+    // a live session's dir vanished and every call failed with ENOENT on
+    // commands/<id>.py.tmp). The watcher survives the missing folder and
+    // resumes as soon as commands/ and results/ exist again.
+    if (!fs.existsSync(this.commandsDir) || !fs.existsSync(this.resultsDir)) {
+      ipcLog.warn(`IPC dirs missing under ${this.config.baseDir}; recreating them before sending.`);
+      await this.ensureDirectories();
+    }
+
     // Step 1: Write .py script file with fsync
     await atomicWrite(scriptPath, scriptContent);
 

@@ -385,11 +385,22 @@ try:
         # Write the first heartbeat immediately so the Node side has a baseline.
         _write_heartbeat()
         loop_count = 0
+        last_err = [None, 0]  # [message, repeats] -- log a repeating error once
         while not _stop_event.WaitOne(POLL_INTERVAL):
             try:
                 if os.path.exists(os.path.join(IPC_BASE_DIR, "terminate.signal")):
                     _log("Terminate signal received")
                     break
+                # Self-heal: if the IPC folders were deleted from under us
+                # (2026-10-18, by another process), recreate them instead of
+                # failing every 50ms -- that left a watcher logging ~16
+                # errors/s (8 MB in 40 min) and its session dead until
+                # someone recreated the folders by hand.
+                if not os.path.isdir(COMMANDS_DIR) or not os.path.isdir(RESULTS_DIR):
+                    for _d in (COMMANDS_DIR, RESULTS_DIR):
+                        if not os.path.isdir(_d):
+                            os.makedirs(_d)
+                    _log("IPC folders were missing; recreated %s" % IPC_BASE_DIR)
                 # Refresh heartbeat every HEARTBEAT_EVERY iterations (5s at
                 # POLL_INTERVAL=50ms). This proves the worker is alive even
                 # when no commands are pending -- the file's mtime is what
@@ -407,7 +418,17 @@ try:
                     # command followed by idle doesn't flag stalled.
                     _write_heartbeat()
             except Exception as e:
-                _log("Worker error: %s" % e)
+                msg = "%s" % e
+                if msg == last_err[0]:
+                    last_err[1] += 1
+                    # same error again: one line per ~1000 repeats (~50 s)
+                    if last_err[1] % 1000 == 0:
+                        _log("Worker error (repeated %d times): %s" % (last_err[1], msg))
+                else:
+                    last_err[0], last_err[1] = msg, 1
+                    _log("Worker error: %s" % msg)
+            else:
+                last_err[0], last_err[1] = None, 0
         _log("Background worker stopped")
 
 

@@ -15,6 +15,13 @@ import { sweepStaleLocks, isPidAlive } from './lock-file';
 import { launcherLog } from './logger';
 
 const SESSION_DIR_PREFIX = 'codesys-mcp-persistent';
+/** Ownership marker in a session dir -- see "ownership" in CodesysLauncher. */
+const OWNER_FILE = 'owner.json';
+/**
+ * Heartbeat age (seconds) past which a watcher with no known AB pid is taken
+ * to be gone, so its IPC dir may be deleted. The watcher writes every ~5s.
+ */
+const WATCHER_GONE_AFTER_S = 30;
 const DEFAULT_READY_TIMEOUT_MS = 60_000;
 const READY_POLL_MS = 500;
 const SHUTDOWN_WAIT_MS = 5_000;
@@ -58,9 +65,95 @@ export class CodesysLauncher implements ScriptExecutor {
    * launch()/shutdown()/forceReset().
    */
   private attached = false;
+  /**
+   * Why the last adoptExisting() passed over each live session it did not
+   * adopt (owned by another live server, a different project, ...). Read by
+   * launch_codesys so the caller learns that a live AB exists and why it was
+   * not taken, instead of silently getting a second AB.
+   */
+  lastAdoptionSkips: Array<{ sessionId: string; reason: string; projectPath: string | null }> = [];
 
   constructor(config: LauncherConfig) {
     this.config = config;
+  }
+
+  /** Folder holding every server's session dirs (shared machine-wide by default). */
+  private get sessionBaseDir(): string {
+    return this.config.sessionBaseDir ?? path.join(os.tmpdir(), SESSION_DIR_PREFIX);
+  }
+
+  // ---------------------------------------------------------------- ownership
+  //
+  // 2026-10-18: a live session's IPC dir (AB pid 26312, healthy watcher) was
+  // deleted from under it, and at the same moment a second AB's, leaving both
+  // watchers polling a folder that no longer existed. The two ways one server
+  // could do that to another's session: adoptExisting() without a project
+  // adopted the newest live session whoever was driving it, and shutdown() /
+  // forceReset() deleted the IPC dir even while its watcher was alive.
+  //
+  // owner.json in a session dir says which MCP server process drives it:
+  // {serverPid} while owned, {serverPid: null} once released by a keep-alive
+  // detach. A session whose owner is ANOTHER live server is never adopted.
+
+  private ownerMarkerPath(dir: string): string {
+    return path.join(dir, OWNER_FILE);
+  }
+
+  /** null = no marker (written by a server older than this protocol). */
+  private readOwner(dir: string): { serverPid: number | null } | null {
+    try {
+      const raw = JSON.parse(fs.readFileSync(this.ownerMarkerPath(dir), 'utf-8'));
+      return { serverPid: typeof raw.serverPid === 'number' ? raw.serverPid : null };
+    } catch {
+      return null;
+    }
+  }
+
+  private writeOwnerMarker(): void {
+    if (!this.ipcDir) return;
+    try {
+      fs.writeFileSync(this.ownerMarkerPath(this.ipcDir),
+        JSON.stringify({ serverPid: process.pid, since: new Date().toISOString() }));
+    } catch (e) {
+      launcherLog.warn(`Could not write ${OWNER_FILE} in ${this.ipcDir}: ${e}`);
+    }
+  }
+
+  private releaseOwnerMarker(): void {
+    if (!this.ipcDir) return;
+    try {
+      fs.writeFileSync(this.ownerMarkerPath(this.ipcDir),
+        JSON.stringify({ serverPid: null, releasedAt: new Date().toISOString() }));
+    } catch { /* dir may already be gone */ }
+  }
+
+  /**
+   * Delete our IPC dir only when its watcher is gone: the AB process has
+   * exited (pid known), or -- pid unknown, e.g. attach mode -- the heartbeat
+   * is missing or older than WATCHER_GONE_AFTER_S. Removing a live watcher's
+   * dir does not stop it; it just leaves it polling a folder that is not
+   * there, and whoever drives that AB gets ENOENT.
+   */
+  private async cleanupIpcDirIfWatcherGone(context: string): Promise<void> {
+    if (!this.ipcClient || !this.ipcDir) return;
+    let gone: boolean;
+    let why: string;
+    if (this.pid !== null) {
+      gone = !this.isRunning();
+      why = gone ? `AB pid ${this.pid} has exited` : `AB pid ${this.pid} is still running`;
+    } else {
+      const age = await this.ipcClient.getHeartbeatAgeSeconds();
+      gone = age === null || age > WATCHER_GONE_AFTER_S;
+      why = age === null ? 'no heartbeat' : `heartbeat ${age.toFixed(1)}s old`;
+    }
+    if (gone) {
+      await this.ipcClient.cleanup();
+      return;
+    }
+    launcherLog.warn(
+      `${context}: IPC dir ${this.ipcDir} left in place (${why}) -- ` +
+      `its watcher is alive and deleting the dir would break whoever drives it.`);
+    this.releaseOwnerMarker();
   }
 
   /**
@@ -129,12 +222,12 @@ export class CodesysLauncher implements ScriptExecutor {
    * anytime. This is how the multi-instance story stays sane on a shared box:
    * you can SEE which AB owns which project before launching/adopting.
    */
-  async listLiveSessions(): Promise<Array<{ sessionId: string; pid: number | null; heartbeatAgeS: number; projectPath: string | null; isMine: boolean }>> {
-    const baseDir = path.join(os.tmpdir(), SESSION_DIR_PREFIX);
+  async listLiveSessions(): Promise<Array<{ sessionId: string; pid: number | null; heartbeatAgeS: number; projectPath: string | null; isMine: boolean; ownedBy: 'this server' | 'another live server' | 'nobody' | 'unknown' }>> {
+    const baseDir = this.sessionBaseDir;
     let entries: string[] = [];
     try { entries = fs.readdirSync(baseDir); } catch { return []; }
     const nowMs = Date.now();
-    const out: Array<{ sessionId: string; pid: number | null; heartbeatAgeS: number; projectPath: string | null; isMine: boolean }> = [];
+    const out: Array<{ sessionId: string; pid: number | null; heartbeatAgeS: number; projectPath: string | null; isMine: boolean; ownedBy: 'this server' | 'another live server' | 'nobody' | 'unknown' }> = [];
     for (const guid of entries) {
       const sessionDir = path.join(baseDir, guid);
       try {
@@ -147,8 +240,14 @@ export class CodesysLauncher implements ScriptExecutor {
           if (typeof info.pid === 'number') pid = info.pid;
         } catch { /* ignore */ }
         if (pid !== null && isPidAlive(pid) === false) continue;
+        const owner = this.readOwner(sessionDir);
+        const ownedBy = owner === null ? 'unknown' as const
+          : owner.serverPid === null ? 'nobody' as const
+          : owner.serverPid === process.pid ? 'this server' as const
+          : isPidAlive(owner.serverPid) === false ? 'nobody' as const
+          : 'another live server' as const;
         const { projectPath } = await this.probeSession(sessionDir, 3000);
-        out.push({ sessionId: guid, pid, heartbeatAgeS: ageMs / 1000, projectPath, isMine: guid === this.sessionId });
+        out.push({ sessionId: guid, pid, heartbeatAgeS: ageMs / 1000, projectPath, isMine: guid === this.sessionId, ownedBy });
       } catch { continue; }
     }
     return out;
@@ -167,7 +266,8 @@ export class CodesysLauncher implements ScriptExecutor {
    */
   async adoptExisting(preferredProjectPath?: string): Promise<boolean> {
     if (this.state === 'ready' || this.state === 'launching') return false;
-    const baseDir = path.join(os.tmpdir(), SESSION_DIR_PREFIX);
+    this.lastAdoptionSkips = [];
+    const baseDir = this.sessionBaseDir;
     let entries: string[] = [];
     try {
       entries = fs.readdirSync(baseDir);
@@ -205,26 +305,47 @@ export class CodesysLauncher implements ScriptExecutor {
     // Newest heartbeat first.
     candidates.sort((a, b) => a.ageMs - b.ageMs);
 
-    // Owner-guard: when a preferred project is given, live-probe candidates in
-    // freshness order and adopt the FIRST one whose open project matches (or
-    // that has nothing open yet). Never adopt a session running a DIFFERENT
-    // project -- that belongs to another agent. Without a preferred project we
-    // keep the newest-live behaviour but still verify it answers.
+    // Owner-guard, in freshness order:
+    //  1. A session another LIVE MCP server owns (owner.json) is never
+    //     adopted, with or without a project -- it is being driven right now.
+    //     Not even probed: no point queueing a command into someone's session.
+    //  2. With a preferred project: adopt the first session whose open
+    //     project matches, or that has nothing open yet.
+    //  3. Without one: adopt only a session that is known to be orphaned
+    //     (owner.json released by a keep-alive detach, or its server pid
+    //     dead) -- that is the keep-alive recycle this exists for -- or, for a
+    //     session from an older server with no owner.json, only if it has no
+    //     project open. Until 2026-10-18 this branch adopted the newest live
+    //     session regardless, i.e. possibly another agent's AB.
     const wantProj = preferredProjectPath ? path.resolve(preferredProjectPath).toLowerCase() : null;
     let chosen: Candidate | null = null;
     let chosenProject: string | null = null;
     for (const cand of candidates) {
-      const { alive, projectPath } = await this.probeSession(cand.dir, 4000);
-      if (!alive) {
-        launcherLog.warn(`adoptExisting(): ${path.basename(cand.dir)} did not answer a live probe; skipping (stale dir).`);
+      const sid = path.basename(cand.dir);
+      const owner = this.readOwner(cand.dir);
+      if (owner && owner.serverPid !== null && owner.serverPid !== process.pid
+          && isPidAlive(owner.serverPid) !== false) {
+        launcherLog.info(`adoptExisting(): ${sid} is owned by live MCP server pid ${owner.serverPid}; not adopting.`);
+        this.lastAdoptionSkips.push({ sessionId: sid, reason: `driven by another live MCP server (pid ${owner.serverPid})`, projectPath: null });
         continue;
       }
+      const knownOrphan = owner !== null; // marker present and its owner released / dead
+      const { alive, projectPath } = await this.probeSession(cand.dir, 4000);
+      if (!alive) {
+        launcherLog.warn(`adoptExisting(): ${sid} did not answer a live probe; skipping (stale dir).`);
+        continue;
+      }
+      const hasProj = projectPath ? path.resolve(projectPath).toLowerCase() : null;
       if (wantProj !== null) {
-        const hasProj = projectPath ? path.resolve(projectPath).toLowerCase() : null;
         if (hasProj !== null && hasProj !== wantProj) {
-          launcherLog.info(`adoptExisting(): ${path.basename(cand.dir)} owns a different project (${projectPath}); not adopting (owner-guard).`);
+          launcherLog.info(`adoptExisting(): ${sid} owns a different project (${projectPath}); not adopting (owner-guard).`);
+          this.lastAdoptionSkips.push({ sessionId: sid, reason: 'has a different project open', projectPath });
           continue; // belongs to another agent / different project
         }
+      } else if (!knownOrphan && hasProj !== null) {
+        launcherLog.info(`adoptExisting(): ${sid} has ${projectPath} open and no ownership marker; not adopting without a matching projectFilePath.`);
+        this.lastAdoptionSkips.push({ sessionId: sid, reason: 'has a project open; pass projectFilePath to adopt it if it is yours', projectPath });
+        continue;
       }
       chosen = cand;
       chosenProject = projectPath;
@@ -254,6 +375,7 @@ export class CodesysLauncher implements ScriptExecutor {
       ...(this.config.commandTimeoutMs ? { commandTimeoutMs: this.config.commandTimeoutMs } : {}),
     });
     await this.ipcClient.ensureDirectories();
+    this.writeOwnerMarker();
 
     this.startedAt = Date.now();
     this.lastError = null;
@@ -302,7 +424,7 @@ export class CodesysLauncher implements ScriptExecutor {
     this.setState('launching');
     this.attached = false; // we are spawning, not attaching
     this.sessionId = uuidv4();
-    this.ipcDir = path.join(os.tmpdir(), SESSION_DIR_PREFIX, this.sessionId);
+    this.ipcDir = path.join(this.sessionBaseDir, this.sessionId);
 
     launcherLog.info(`Session ${this.sessionId} — IPC dir: ${this.ipcDir}`);
 
@@ -329,6 +451,7 @@ export class CodesysLauncher implements ScriptExecutor {
       ...(this.config.commandTimeoutMs ? { commandTimeoutMs: this.config.commandTimeoutMs } : {}),
     });
     await this.ipcClient.ensureDirectories();
+    this.writeOwnerMarker();
 
     // Prepare watcher script with interpolated IPC path. ScriptManager.
     // interpolate() now Python-escapes the value, so no manual pre-escape.
@@ -486,10 +609,8 @@ sys.exit(0)
       }
     }
 
-    // Clean up IPC directory
-    if (this.ipcClient) {
-      await this.ipcClient.cleanup();
-    }
+    // Clean up the IPC directory -- only if its watcher is gone.
+    await this.cleanupIpcDirIfWatcherGone('shutdown()');
 
     this.pid = null;
     this.process = null;
@@ -515,6 +636,9 @@ sys.exit(0)
       `IPC dir preserved: ${this.ipcDir}`
     );
     this.stopHealthMonitor();
+    // Mark the session released: the next server may adopt it even without a
+    // projectFilePath (it is a known orphan, not another agent's AB).
+    this.releaseOwnerMarker();
     // Drop in-memory handles only. Do NOT cleanup() the IPC dir -- the live
     // watcher still owns it and the next server needs it to adopt.
     this.ipcClient = null;
@@ -560,7 +684,7 @@ sys.exit(0)
     this.setState('launching');
     this.attached = true; // user owns the GUI; pid will stay null
     this.sessionId = uuidv4();
-    this.ipcDir = path.join(os.tmpdir(), SESSION_DIR_PREFIX, this.sessionId);
+    this.ipcDir = path.join(this.sessionBaseDir, this.sessionId);
     launcherLog.info(`Attach session ${this.sessionId} — IPC dir: ${this.ipcDir}`);
 
     this.ipcClient = new IpcClient({
@@ -568,6 +692,7 @@ sys.exit(0)
       ...DEFAULT_IPC_CONFIG,
     });
     await this.ipcClient.ensureDirectories();
+    this.writeOwnerMarker();
 
     const scriptManager = new ScriptManager();
     const watcherTemplate = scriptManager.loadTemplate('watcher');
@@ -655,10 +780,16 @@ sys.exit(0)
     queueDepth: { pendingCommands: number; orphanResults: number } | null;
     watcherErrorLog: string | null;
     isProcessAlive: boolean;
+    ipcDirIntact: boolean | null;
     interpretation: string;
   }> {
     const status = await this.getStatusAsync();
     const isProcessAlive = this.isRunning();
+    // null = not connected to a session (none yet, or shut down -- then the
+    // folder is gone on purpose). false = our session folder (or commands/ /
+    // results/) is gone while we still think we are connected.
+    const ipcDirIntact = this.ipcDir === null || this.ipcClient === null ? null
+      : ['commands', 'results'].every((d) => fs.existsSync(path.join(this.ipcDir as string, d)));
     let queueDepth: { pendingCommands: number; orphanResults: number } | null = null;
     let watcherErrorLog: string | null = null;
     if (this.ipcClient) {
@@ -671,6 +802,12 @@ sys.exit(0)
     let interpretation: string;
     if (!isProcessAlive && status.state !== 'stopped' && status.state !== 'launching') {
       interpretation = 'CODESYS process is dead but launcher state is not stopped -- call launch_codesys to recover.';
+    } else if (ipcDirIntact === false && (status.state === 'ready' || status.state === 'stalled')) {
+      // 2026-10-18: this used to read "Healthy" with "Heartbeat: never" while
+      // every command failed with ENOENT.
+      interpretation = `IPC session folder MISSING (${this.ipcDir}): commands cannot reach the watcher. ` +
+        `Usually another process deleted it. Not destructive to fix: the next command recreates commands/ and results/ ` +
+        `and a live watcher resumes on its own -- do NOT force_reset_watcher for this, it would kill a healthy AB.`;
     } else if (status.state === 'stalled') {
       interpretation = `Watcher heartbeat stale (age=${status.heartbeatAgeSeconds?.toFixed(1)}s). Worker thread died or primary UI thread is deadlocked. Call force_reset_watcher to recover.`;
     } else if (status.state === 'ready' && status.heartbeatAgeSeconds !== null && status.heartbeatAgeSeconds !== undefined && status.heartbeatAgeSeconds > HEARTBEAT_STALL_THRESHOLD_S) {
@@ -683,7 +820,7 @@ sys.exit(0)
       interpretation = `Launcher state is '${status.state}'. See lastError for details.`;
     }
 
-    return { status, queueDepth, watcherErrorLog, isProcessAlive, interpretation };
+    return { status, queueDepth, watcherErrorLog, isProcessAlive, ipcDirIntact, interpretation };
   }
 
   /**
@@ -838,7 +975,7 @@ sys.exit(0)
 
     // Clean up the IPC dir for the dead session.
     if (this.ipcClient) {
-      try { await this.ipcClient.cleanup(); } catch { /* ignore */ }
+      try { await this.cleanupIpcDirIfWatcherGone('forceReset()'); } catch { /* ignore */ }
     }
     this.pid = null;
     this.process = null;

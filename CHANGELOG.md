@@ -53,6 +53,18 @@ Both designed from live probes (separate headless AB, temporary copy of an AC500
 - The other 2 are a latent bug the copies shared and the unified parser fixes: they only checked that the LAST component ended the literal, so `'t#1msGARBAGE5s'` read as 5001 ms and `'t#5x10ms'` as 10 ms. Components must now cover the literal back to back. That matters most in `set_task_parameter`'s read-back, where a misparse could "verify" a write that did not happen.
 - Live (headless AB, copy of an AC500 V3 project): `get_task_configuration` read the task at 10 ms / watchdog 20 ms; `set_task_parameter` wrote 50 ms and 100 ms and read both back; a fresh AB process read them from disk. The same run disarmed the watchdog (`watchdogEnabled=false`, a real change from armed) and it read back disarmed -- the toggle verification still open from 2026-10-12.
 
+### Fixed 2026-10-18: one server could break another server's live AB session
+
+Reported by the MPLUS IO session: at 18:40:50 the IPC folder of its live session (AB PID 26312, healthy watcher) was deleted, and so was the one of a second AB (PID 13804). Every command then failed with `ENOENT` on `commands/<id>.py.tmp`, `diagnose_mcp_state` answered "Healthy" with "Heartbeat: never", and the 13804 watcher logged the same error about 16 times a second -- 8 MB in 40 minutes -- until its folders were recreated by hand. Which process did it could not be established: the registration has no `--log-file`, so nothing recorded it. What the code review did establish is how one server could do this to another, and both paths are closed:
+
+- **Adoption took other agents' AB.** `adoptExisting()` without a `projectFilePath` adopted the newest live session, whoever was driving it. Each session folder now carries an `owner.json` (`{serverPid}` while a server drives it, `{serverPid: null}` once a keep-alive detach releases it). A session driven by another live MCP server is never adopted -- not even probed. Without a project, only a released or orphaned session is adopted (the keep-alive recycle case), or, for sessions started by older servers without a marker, an idle one. `launch_codesys` now says which live sessions it passed over and why; `list_ab_sessions` shows `ownedBy`.
+- **Shutdown and reset deleted live folders.** `shutdown()` and `forceReset()` always removed the IPC folder at the end, even when the AB was still running or its PID was unknown. The folder is now removed only when its watcher is gone: the AB process has exited, or -- PID unknown -- its heartbeat is missing or older than 30 s.
+- **Nothing healed.** The client now recreates `commands/` and `results/` before sending, so a deleted folder costs nothing; newly launched watchers recreate them too instead of failing every 50 ms, and log a repeating error once per ~1000 repeats instead of every time. `diagnose_mcp_state` reports the folder MISSING and warns not to `force_reset_watcher` for it, which would kill a healthy AB.
+- `sessionBaseDir` makes the session folder configurable: the default is shared by every server on the machine, and the new tests must never touch it. 12 tests; disabling the four guards fails exactly the six that test them, while the six describing allowed behaviour (adopting released, orphaned, idle or matching sessions; deleting after the AB exited) keep passing.
+- Repaired by hand on this machine: the 13804 session (its folders recreated, non-destructively). The MPLUS IO session had already repaired its own.
+
+Running servers keep their old TypeScript code until Claude Code is restarted, and running watchers keep theirs until their AB is relaunched.
+
 ### Known issues found, not fixed here
 
 - None left from this round.
