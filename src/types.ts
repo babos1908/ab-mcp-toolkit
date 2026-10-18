@@ -37,8 +37,12 @@ export enum MCPErrorCode {
   ERR_PROJECT_LOCKED = 'ERR_PROJECT_LOCKED',
   /** Project file is corrupt or unreadable by AB. */
   ERR_PROJECT_CORRUPT = 'ERR_PROJECT_CORRUPT',
+  /** Project is open READ-ONLY (a Released library/project) so save() fails; unset with set_project_info(released=false). */
+  ERR_PROJECT_READ_ONLY = 'ERR_PROJECT_READ_ONLY',
   /** A POU / object lookup failed (path not in tree). */
   ERR_OBJECT_NOT_FOUND = 'ERR_OBJECT_NOT_FOUND',
+  /** An object with that name already exists (e.g. create_task on an existing task). */
+  ERR_OBJECT_EXISTS = 'ERR_OBJECT_EXISTS',
 
   // ─── Library ──────────────────────────────────────────────────────
   /** Library is not installed in any repository. */

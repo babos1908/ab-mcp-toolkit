@@ -17,6 +17,15 @@ import { BackupManager } from './backup-manager';
 import { diffLibraryFiles } from './library-diff';
 import { parseProjectOffline, searchProjectOffline } from './offline-reader';
 import { parseResultJson } from './result-parser';
+import { readOnlyHint } from './response-hints';
+import {
+  CompileMessage,
+  CacheFileReport,
+  parseCompileMessagesBlock,
+  parseMemoryUsage,
+  formatMemorySummary,
+  formatCacheReport,
+} from './compile-report';
 import { serverLog, setLogLevel, setLogFile, getLogFile } from './logger';
 
 /** Resolve a file path to an absolute normalized path */
@@ -65,11 +74,12 @@ function formatToolResponse(
   // it without parsing prose.
   const code = extractErrorCode(result.output);
   const codePrefix = code ? `[${code}] ` : '';
+  const hint = readOnlyHint(result.output);
   return {
     content: [
       {
         type: 'text' as const,
-        text: `${codePrefix}Operation failed. Output:\n${result.output}${result.error ? '\nError: ' + result.error : ''}`,
+        text: `${codePrefix}${hint ? hint + '\n' : ''}Operation failed. Output:\n${result.output}${result.error ? '\nError: ' + result.error : ''}`,
       },
     ],
     isError: true,
@@ -134,6 +144,13 @@ async function fileExists(filePath: string): Promise<boolean> {
  * roughly chronological. Each entry maps a short stable ID to a description.
  */
 const MCP_PATCHES: Array<{ id: string; description: string }> = [
+  { id: 'library-refs-via-references-api', description: 'remove_library / list_project_libraries / get|set|reset|export|import_library_parameters find references through ScriptLibManObject.references across ALL Library Managers (an application project has two: Application and the project-root POU pool), not lm.get_children() (empty on AB 2.9). remove_library no longer refuses every "#" reference: "#" means placeholder, only system_library=True references are refused, and remove_library() is called with the "#"-prefixed display name (the bare one raises KeyError). Library parameters: ref.parameters lists only the project\'s OVERRIDES (why AC500-V3-utilities-web 1.0.0 looked parameterless), params[name]=expr writes one for ANY name, "" neutralises it (the name stays listed but reading it raises KeyError and the default applies -- such tombstones are not overrides); names are validated against the constants in the library .library source (opened as a secondary project), defaults reported from there. Live-verified 2026-10-17 on a copy of an AC500 V3 PM5032 project: gc_udiPageMax:=65536 persisted and changed the build memory report.' },
+  { id: 'install-library-no-forced-save', description: 'install_library_to_repository installs from the .library FILE: not opened when it is not the primary project (the user\'s open project is no longer switched), saved only when it is open AND dirty. A Released library opens read-only and its save() raises "opened in read-only mode" even with nothing to save, which made every released library (MProtocol 1.0.0, LogiQ 0.0.2) uninstallable. Live-verified 2026-10-17: install works with the library open or closed.' },
+  { id: 'compile-memory-report-and-incremental', description: 'compile_project / get_compile_messages return the build memory report (category "Memory Usage" ee56da69 + "Memory area N" lines of Build) as structured memoryUsage, apart from errors/warnings; compile_project gains incremental=true (skip target_app.clean()) and reports which .compileinfo/.bootinfo/.bootinfo_guids files clean() removed -- live 2026-10-17: a scripted build, even a successful one, never rewrites them.' },
+  { id: 'released-flag-and-read-only', description: 'set_project_info(released=true|false). A Released project opens READ-ONLY (allow_readonly makes no difference, live 2026-10-17); clearing the flag in the same session makes save() work. Saves in the touched scripts go through save_project_checked() -> ERR_PROJECT_READ_ONLY with the fix in the message; formatToolResponse adds the same hint to any tool whose output says "opened in read-only mode".' },
+  { id: 'create-task-and-task-string-props', description: 'create_task tool (kind, interval, priority, watchdog, POU calls) and set_task_parameter addPous/kind, sharing set_task_parameter.py. Also fixes priority and watchdogSensitivity: on AC500 V3 they are STRING properties and assigning an int raises TypeError, so both always failed; now retried as a string and read back (priority was previously not verified at all).' },
+  { id: 'inspect-tree-raw-types-children', description: 'inspect_project_tree reports every node it cannot file as POU/GVL/DUT/folder/device in "others" with its raw type GUID + marker-derived name (an ImagePool vanished, so App/Visu looked empty), and childrenOf=<path> lists one node\'s direct children with kind, typeName, typeGuid, className, childCount.' },
+  { id: 'cleanup-backups-keep-zero', description: 'cleanup_backups(keep=0) deletes every auto-backup as documented (it answered "removed 0": keep<=0 was read as "unbounded" like the retention setting). Only the default taken from an unbounded retention keeps everything.' },
   { id: 'unsubstituted-placeholder-guard', description: 'An optional placeholder added to a script before the server process catches up arrived as the LITERAL string "{NAME}" and was parsed as a real value. ScriptManager.interpolate only replaces {KEY} for keys the handler passed and leaves unknown ones verbatim; scripts are template-side (re-read per call) while handlers live in the server, so every newly added optional param has a window -- until Claude Code is restarted -- where the new script runs against the old handler. Caught in the field 2026-10-12 within hours of shipping task-watchdog-literal-and-readback: set_task_parameter received "{WATCHDOG_ENABLED}", _maybe_bool treated any non-empty string as a value and returned False, so a call asking to arm a watchdog DISABLED it instead -- failing toward the unsafe side, silently. Fixes: _text_utils.opt_placeholder() recognises an unsubstituted "{NAME}" and returns \'\' (= not provided, prior behaviour) while printing a WARN naming the stale-server cause, so the skew is visible rather than looking deliberate; set_task_parameter routes every placeholder through it, and its _maybe_bool is now strict (only true/1/yes/on and false/0/no/off count -- anything unrecognised is None, never a silent False). Any NEW optional placeholder should go through opt_placeholder for the same reason. The other 13 scripts using the in-(true,1,yes,on) idiom were left alone deliberately: their flags are long-standing params the handler always passes (no skew window), and an unsubstituted value there would fall to False, which is their harmless default.' },
   { id: 'task-watchdog-literal-and-readback', description: 'set_task_parameter: watchdogTimeMs was a SILENT NO-OP on AC500 V3 reported as success -- the same IEC-TIME-literal defect already fixed for the cycle time in task-cycle-iec-time-literal, except the watchdog branch still did an unconditional setattr(wd, time, TimeSpan) with NO read-back. Field consequence (2026-10-12, AB 2.9 SP19 Premium, PM5032-T-ETH): a call setting cycleTimeMs=20 + watchdogTimeMs=5000 answered "Task updated (cycleTimeMs, watchdogTimeMs)" while the watchdog stayed at 20ms; on the PLC it tripped at the first blocking NBS.ResolveHostname and had to be disabled by hand in the AB task editor. Fixes: (1) the literal-vs-TimeSpan choice and the read-back are now one shared helper used by EVERY time-valued write; (2) verification compares MILLISECONDS, which also closes a hole where the cycle-time TimeSpan path was never verified at all (only the string path was) and an unreadable read-back now counts as failure instead of silent success; (3) the watchdog owner is re-fetched for the read-back so a per-access wrapper cannot mask a dropped write; (4) a requested knob that did not take now FAILS the call with ERR_WRITE_DID_NOT_STICK naming applied vs failed fields, instead of a SCRIPT_SUCCESS with the failure buried in a "skipped" line. New knobs watchdogEnabled (disable the watchdog for tasks that legitimately block -- previously GUI-only) and watchdogSensitivity. Time is written before the enable toggle so a task is never briefly armed with the old timeout. Static-verified (IEC parser agrees with the reader on 20 cases; write-back simulated against string/dead/TimeSpan attribute shapes) -- NOT yet re-tested on a PLC.' },
   { id: 'online-executor-fallback-UNVERIFIED', description: '⚠️ UNVERIFIED ON AB2.9/SP19 (2026-06-29). Ported from luke-harriman/Codesys-MCP a063aad (verified there on CODESYS V3 SP16, ifm hardware -- different vendor+SP than ours). Root cause: create_online_application and every scriptengine.online op raise "Stack empty" from IPC-driven scripts because the IDE-internal _executionStack only populates via the executor Executing event, which IPC bypasses -- independently diagnosed by both projects. Fix: reflect into scriptengine.online._executor and route calls through its ExecuteSource(source), which fires Executing/Executed. with_executor() wraps connect_to_device/download_to_device/start_stop_application/get_application_state/read_variable/write_variable/monitor_variables. Degrades to a direct call (today\'s behavior, same error) if reflection fails on this build -- cannot regress. write_variable also switched to the canonical set_prepared_value+force_prepared_values (write_value/write don\'t exist on IScriptOnlineApplication SP14+), with a legacy fallback. Needs an on-PLC test against AB2.9/AC500 before the "online is dead" framing elsewhere in the skill/docs is revised.' },
@@ -741,7 +758,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   s.tool(
     'set_project_info',
-    "Updates the Project Information node (Title / Version / Author / Company / Description). Mirrors the AB UI menu 'Project > Project Information'. Pass only the fields you want to change; omitted fields are left untouched. Saves the project after applying changes. Useful for automated version bumps in CI/CD pipelines that maintain a library's auto-generated GetVersion() POU.",
+    "Updates Project Information (version, title, author, company, description, released) and saves. Only passed fields change. released=false unlocks a Released (read-only) project.",
     {
       projectFilePath: z.string().describe("Path to the project file."),
       version: z.string().describe("Project version. Format: 'MAJOR.MINOR.SERVICEPACK[.BUILD]', e.g. '1.0.5' or '1.0.5.42'.").optional(),
@@ -749,8 +766,9 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       author: z.string().describe("Project author.").optional(),
       company: z.string().describe("Project company.").optional(),
       description: z.string().describe("Project description (multi-line allowed).").optional(),
+      released: z.boolean().describe("The 'Released' flag. AB opens a Released project/library READ-ONLY and every save fails ('opened in read-only mode'); false clears it in the same session so this call and later edits can save (bump the version too -- a released version should not change). true marks it released after the other fields are applied.").optional(),
     },
-    async (args: { projectFilePath: string; version?: string; title?: string; author?: string; company?: string; description?: string }) => {
+    async (args: { projectFilePath: string; version?: string; title?: string; author?: string; company?: string; description?: string; released?: boolean }) => {
       const escaped = resolvePath(args.projectFilePath, workspaceDir);
       const provided = [
         args.version !== undefined ? 'version' : '',
@@ -758,10 +776,11 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         args.author !== undefined ? 'author' : '',
         args.company !== undefined ? 'company' : '',
         args.description !== undefined ? 'description' : '',
+        args.released !== undefined ? 'released' : '',
       ].filter(Boolean);
       if (provided.length === 0) {
         return {
-          content: [{ type: 'text' as const, text: 'Error: at least one of version/title/author/company/description must be provided.' }],
+          content: [{ type: 'text' as const, text: 'Error: at least one of version/title/author/company/description/released must be provided.' }],
           isError: true,
         };
       }
@@ -774,6 +793,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
           AUTHOR: args.author ?? '',
           COMPANY: args.company ?? '',
           DESCRIPTION: args.description ?? '',
+          RELEASED: args.released === undefined ? '' : String(args.released),
         },
         ['_text_utils', 'ensure_project_open']
       );
@@ -1049,33 +1069,31 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   s.tool(
     'compile_project',
-    'Compiles (Builds) the primary application within a CODESYS project. Returns structured compiler messages (errors, warnings) when available.',
+    'Builds the active application. Returns errors/warnings, the memory report (memoryUsage) and which build-cache files clean() removed; incremental=true skips clean().',
     {
       projectFilePath: z.string().describe("Path to the project file containing the application to compile."),
+      incremental: z.boolean().describe("true = build WITHOUT target_app.clean(). clean() (the default) deletes the <project>.<Device>.<App>.<guid>.compileinfo / .bootinfo / .bootinfo_guids files next to the project -- often tracked in git, and what online change needs -- and a scripted build does not rewrite them (only a download / online change / boot application does). Use true in repos that track them or before an online change.").optional(),
     },
-    async (args: { projectFilePath: string }) => {
+    async (args: { projectFilePath: string; incremental?: boolean }) => {
       const escaped = resolvePath(args.projectFilePath, workspaceDir);
       const script = scriptManager.prepareScriptWithHelpers(
-        'compile_project', { PROJECT_FILE_PATH: escaped }, ['_text_utils', 'ensure_project_open']
+        'compile_project',
+        { PROJECT_FILE_PATH: escaped, INCREMENTAL: args.incremental ? 'true' : 'false' },
+        ['_text_utils', 'ensure_project_open']
       );
       const result = await executor.executeScript(script, 120_000); // 120s timeout for compile
 
       const success = result.success && result.output.includes('SCRIPT_SUCCESS');
 
       // Parse structured compile messages if present
-      let compileMessages: Array<{ severity: string; text: string; object?: string; line?: number }> = [];
-      const msgStartMarker = '### COMPILE_MESSAGES_START ###';
-      const msgEndMarker = '### COMPILE_MESSAGES_END ###';
-      const msgStartIdx = result.output.indexOf(msgStartMarker);
-      const msgEndIdx = result.output.indexOf(msgEndMarker);
-      if (msgStartIdx !== -1 && msgEndIdx !== -1 && msgStartIdx < msgEndIdx) {
-        try {
-          const jsonStr = result.output.substring(msgStartIdx + msgStartMarker.length, msgEndIdx).trim();
-          compileMessages = JSON.parse(jsonStr);
-        } catch {
-          // JSON parse failed, ignore
-        }
-      }
+      const compileMessages: CompileMessage[] = parseCompileMessagesBlock(result.output);
+      const extra = parseResultJson<{
+        incremental?: boolean;
+        memoryLines?: string[];
+        buildSummary?: string[];
+        cacheFiles?: CacheFileReport;
+      }>(result.output);
+      const memoryUsage = extra.ok ? parseMemoryUsage(extra.data.memoryLines ?? []) : null;
 
       // Build response message
       let message: string;
@@ -1115,6 +1133,27 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
           message += ' WARNING: Build command reported errors. Use get_compile_messages for details.';
           isError = true;
         }
+      }
+
+      // Memory report + build-cache report, kept apart from errors/warnings.
+      if (success && extra.ok) {
+        const d = extra.data;
+        if (d.buildSummary && d.buildSummary.length > 0) {
+          message += `\n\n${d.buildSummary.join('\n')}`;
+        }
+        if (memoryUsage) {
+          message += `\n\n${formatMemorySummary(memoryUsage)}`;
+        } else {
+          message += '\n\nMemory: no memory report in the build output (it is printed only when code generation completes).';
+        }
+        if (d.cacheFiles) {
+          message += `\n${formatCacheReport({ ...d.cacheFiles, incremental: !!d.incremental })}`;
+        }
+        message += '\n\n' + JSON.stringify(
+          { memoryUsage, cacheFiles: d.cacheFiles ?? null, incremental: !!d.incremental },
+          null,
+          2
+        );
       }
 
       // Surface the Python script's DEBUG / WARN lines so the caller can
@@ -1217,18 +1256,20 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   s.tool(
     'inspect_project_tree',
-    "Return a structured JSON dump of the project tree: devices, library references (with version), POUs, GVLs, DUTs, folders, tasks. Categorization is best-effort (CODESYS scripting does not expose a stable type enum, so we infer from probed attributes). Optionally include the first 200 chars of each POU/GVL/DUT declaration for quick orientation. Replaces ad-hoc DFS walks the agent might do via get_all_pou_code+list_project_libraries+get_task_configuration in 3 separate round trips.",
+    "JSON dump of the project tree (devices, POUs, GVLs, DUTs, folders, tasks, others with raw type GUID, e.g. ImagePool). childrenOf lists one node's direct children instead.",
     {
       projectFilePath: z.string().describe("Path to the project file."),
       includeSymbols: z.boolean().describe("If true, embed first 200 chars of each POU/GVL/DUT declaration. Default false (compact dump).").optional(),
+      childrenOf: z.string().describe("Path of ONE node (full, or an unambiguous tail such as 'App/Visu') whose direct children to list, each with kind, typeName, raw typeGuid, className and childCount. Returns only that list.").optional(),
     },
-    async (args: { projectFilePath: string; includeSymbols?: boolean }) => {
+    async (args: { projectFilePath: string; includeSymbols?: boolean; childrenOf?: string }) => {
       const escaped = resolvePath(args.projectFilePath, workspaceDir);
       const script = scriptManager.prepareScriptWithHelpers(
         'inspect_project_tree',
         {
           PROJECT_FILE_PATH: escaped,
           INCLUDE_SYMBOLS: args.includeSymbols ? 'true' : 'false',
+          CHILDREN_OF: (args.childrenOf ?? '').trim().replace(/\\/g, '/'),
         },
         ['_text_utils', 'ensure_project_open']
       );
@@ -1664,7 +1705,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   s.tool(
     'get_compile_messages',
-    "Retrieves the last compiler messages (errors, warnings) without triggering a new build. Note: returns the cached results from the last compile_project run; if you've edited code since, run compile_project to refresh.",
+    "Reads the last build's messages (errors, warnings, memory report) without building. Cached from the last compile_project; rebuild after edits.",
     {
       projectFilePath: z.string().describe("Path to the project file."),
     },
@@ -1681,28 +1722,27 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       }
 
       // Parse structured messages
-      let compileMessages: Array<{ severity: string; text: string; object?: string; line?: number }> = [];
-      const msgStartMarker = '### COMPILE_MESSAGES_START ###';
-      const msgEndMarker = '### COMPILE_MESSAGES_END ###';
-      const msgStartIdx = result.output.indexOf(msgStartMarker);
-      const msgEndIdx = result.output.indexOf(msgEndMarker);
-      if (msgStartIdx !== -1 && msgEndIdx !== -1 && msgStartIdx < msgEndIdx) {
-        try {
-          const jsonStr = result.output.substring(msgStartIdx + msgStartMarker.length, msgEndIdx).trim();
-          compileMessages = JSON.parse(jsonStr);
-        } catch {
-          // JSON parse failed
-        }
-      }
+      const compileMessages: CompileMessage[] = parseCompileMessagesBlock(result.output);
+      const extra = parseResultJson<{ memoryLines?: string[]; buildSummary?: string[] }>(result.output);
+      const memoryUsage = extra.ok ? parseMemoryUsage(extra.data.memoryLines ?? []) : null;
+      const memoryText = memoryUsage
+        ? `\n\n${formatMemorySummary(memoryUsage)}\n${JSON.stringify({ memoryUsage }, null, 2)}`
+        : '';
+      const summaryText = extra.ok && extra.data.buildSummary?.length ? `\n\n${extra.data.buildSummary.join('\n')}` : '';
 
       if (compileMessages.length === 0) {
         return {
-          content: [{ type: 'text' as const, text: `No compile messages found. The message API may not be available in this CODESYS version.` }],
+          content: [{
+            type: 'text' as const,
+            text: (memoryUsage || summaryText
+              ? `0 error(s), 0 warning(s).${summaryText}${memoryText}`
+              : `No compile messages found. The message API may not be available in this CODESYS version.`),
+          }],
           isError: false,
         };
       }
 
-      const errors = compileMessages.filter((m) => m.severity === 'error');
+      const errors = compileMessages.filter((m) => m.severity === 'error' || m.severity === 'fatal');
       const warnings = compileMessages.filter((m) => m.severity === 'warning');
       const formatMsg = (m: { severity: string; text: string; object?: string; line?: number }) => {
         const loc = m.object ? (m.line != null ? ` [${m.object}:${m.line}]` : ` [${m.object}]`) : '';
@@ -1716,10 +1756,11 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       if (warnings.length > 0) {
         message += '\nWarnings:\n' + warnings.map(formatMsg).join('\n');
       }
-      const others = compileMessages.filter((m) => m.severity !== 'error' && m.severity !== 'warning');
+      const others = compileMessages.filter((m) => m.severity !== 'error' && m.severity !== 'fatal' && m.severity !== 'warning');
       if (others.length > 0) {
         message += '\nOther:\n' + others.map(formatMsg).join('\n');
       }
+      message += summaryText + memoryText;
 
       return {
         content: [{ type: 'text' as const, text: message }],
@@ -2348,7 +2389,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   s.tool(
     'list_project_libraries',
-    'Lists all libraries currently referenced in the CODESYS project.',
+    "Lists the project's library references per Library Manager, marking placeholders ('#X' -> resolved library) and system references.",
     {
       projectFilePath: z.string().describe("Path to the project file."),
     },
@@ -2379,7 +2420,10 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
       try {
         const jsonStr = result.output.substring(startIdx + libStartMarker.length, endIdx).trim();
-        const libraries: Array<{ name: string; version?: string; company?: string }> = JSON.parse(jsonStr);
+        const libraries: Array<{
+          name: string; version?: string; company?: string; displayName?: string;
+          placeholder?: boolean; system?: boolean | null; resolution?: string; manager?: string;
+        }> = JSON.parse(jsonStr);
 
         if (libraries.length === 0) {
           return {
@@ -2388,15 +2432,35 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
           };
         }
 
-        const lines = libraries.map((lib) => {
-          let line = `- ${lib.name}`;
-          if (lib.version) line += ` (v${lib.version})`;
-          if (lib.company) line += ` [${lib.company}]`;
-          return line;
-        });
+        // Group by Library Manager: an application project has two (the
+        // Application one and the project-root POU-pool one).
+        const lines: string[] = [];
+        let lastManager: string | undefined;
+        const managers = new Set(libraries.map((l) => l.manager ?? ''));
+        for (const lib of libraries) {
+          if (managers.size > 1 && lib.manager !== lastManager) {
+            lines.push(`${lib.manager || '(Library Manager)'}:`);
+            lastManager = lib.manager;
+          }
+          let line: string;
+          if (lib.displayName) {
+            line = `- ${lib.displayName}`;
+            if (lib.placeholder && lib.resolution) line += ` -> ${lib.resolution}`;
+            const tags = [lib.placeholder ? 'placeholder' : '', lib.system ? 'system' : ''].filter(Boolean);
+            if (tags.length) line += ` [${tags.join(', ')}]`;
+          } else {
+            line = `- ${lib.name}`;
+            if (lib.version) line += ` (v${lib.version})`;
+            if (lib.company) line += ` [${lib.company}]`;
+          }
+          lines.push(line);
+        }
+        const nSystem = libraries.filter((l) => l.system).length;
+        const head = `${libraries.length} library reference(s)` +
+          (nSystem ? ` (${nSystem} system: added by the device/plug-ins, not removable)` : '') + ':';
 
         return {
-          content: [{ type: 'text' as const, text: `${libraries.length} library/libraries:\n${lines.join('\n')}` }],
+          content: [{ type: 'text' as const, text: `${head}\n${lines.join('\n')}` }],
           isError: false,
         };
       } catch {
@@ -2612,69 +2676,105 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
     }
   );
 
+  // set_task_parameter and create_task share set_task_parameter.py: the
+  // create path is the same verified write of every knob, preceded by
+  // TaskConfiguration.create_task(name).
+  type TaskArgs = {
+    projectFilePath: string;
+    taskName: string;
+    cycleTimeMs?: number;
+    watchdogTimeMs?: number;
+    watchdogEnabled?: boolean;
+    watchdogSensitivity?: number;
+    priority?: number;
+    stackSizeBytes?: number;
+    kind?: string;
+    pous?: string[];
+    addPous?: string[];
+  };
+  const taskKnobs = {
+    cycleTimeMs: z.number().int().positive().describe("Cycle time / interval in milliseconds.").optional(),
+    watchdogTimeMs: z.number().int().positive().describe("Watchdog timeout in milliseconds. Also arms the watchdog unless watchdogEnabled is passed explicitly. NOTE: the watchdog measures EXECUTION time per cycle, not the cycle period.").optional(),
+    watchdogEnabled: z.boolean().describe("Arm (true) or disable (false) the task watchdog. Pass false when the task makes blocking calls that legitimately exceed the timeout -- e.g. NBS.ResolveHostname on a bench program -- instead of disabling it by hand in the AB task editor. Overrides the implicit arming done by watchdogTimeMs.").optional(),
+    watchdogSensitivity: z.number().int().positive().describe("Watchdog sensitivity: the number of consecutive cycles that must exceed the timeout before the watchdog trips (AC500 V3 default 1).").optional(),
+    priority: z.number().int().min(0).max(31).describe("Task priority (0 = highest, 31 = lowest on AC500 V3).").optional(),
+    stackSizeBytes: z.number().int().positive().describe("Stack size in bytes. Required when a library has large STRING(N) buffers that overflow the default ~128KB stack; common bump is 262144 (256KB).").optional(),
+    kind: z.enum(['cyclic', 'freewheeling', 'event', 'status', 'externalevent']).describe("Kind of task (KindOfTask). cycleTimeMs applies to cyclic tasks.").optional(),
+  };
+  const runTaskScript = async (args: TaskArgs, create: boolean) => {
+    const pous = create ? (args.pous ?? []) : (args.addPous ?? []);
+    const provided = [
+      args.cycleTimeMs !== undefined ? 'cycleTimeMs' : '',
+      args.watchdogTimeMs !== undefined ? 'watchdogTimeMs' : '',
+      args.watchdogEnabled !== undefined ? 'watchdogEnabled' : '',
+      args.watchdogSensitivity !== undefined ? 'watchdogSensitivity' : '',
+      args.priority !== undefined ? 'priority' : '',
+      args.stackSizeBytes !== undefined ? 'stackSizeBytes' : '',
+      args.kind !== undefined ? 'kind' : '',
+      pous.length > 0 ? (create ? 'pous' : 'addPous') : '',
+    ].filter(Boolean);
+    if (!create && provided.length === 0) {
+      return {
+        content: [{ type: 'text' as const, text: 'Error: at least one of cycleTimeMs / watchdogTimeMs / watchdogEnabled / watchdogSensitivity / priority / stackSizeBytes / kind / addPous must be provided.' }],
+        isError: true,
+      };
+    }
+    const escaped = resolvePath(args.projectFilePath, workspaceDir);
+    const script = scriptManager.prepareScriptWithHelpers(
+      'set_task_parameter',
+      {
+        PROJECT_FILE_PATH: escaped,
+        TASK_NAME: args.taskName.trim(),
+        CYCLE_TIME_MS: args.cycleTimeMs !== undefined ? String(args.cycleTimeMs) : '',
+        WATCHDOG_TIME_MS: args.watchdogTimeMs !== undefined ? String(args.watchdogTimeMs) : '',
+        WATCHDOG_ENABLED: args.watchdogEnabled !== undefined ? String(args.watchdogEnabled) : '',
+        WATCHDOG_SENSITIVITY: args.watchdogSensitivity !== undefined ? String(args.watchdogSensitivity) : '',
+        PRIORITY: args.priority !== undefined ? String(args.priority) : '',
+        STACK_SIZE_BYTES: args.stackSizeBytes !== undefined ? String(args.stackSizeBytes) : '',
+        CREATE_TASK: create ? 'true' : 'false',
+        TASK_KIND: args.kind ?? '',
+        ADD_POUS: pous.map((p) => p.trim()).filter(Boolean).join('\n'),
+      },
+      ['_text_utils', 'ensure_project_open']
+    );
+    await backupManager.snapshot(escaped);
+    const result = await executor.executeScript(script);
+    // The headline only claims the requested knobs because the script
+    // hard-fails when any of them did not take -- on success, requested ==
+    // applied.
+    return formatStructuredResponse(
+      result,
+      create
+        ? `Task '${args.taskName}' created in ${args.projectFilePath}.`
+        : `Task '${args.taskName}' updated (${provided.join(', ')}) in ${args.projectFilePath}.`,
+      create
+        ? `Task '${args.taskName}' created${provided.length ? ` (${provided.join(', ')})` : ''} and saved:`
+        : `Task '${args.taskName}' updated (${provided.join(', ')}) and saved:`
+    );
+  };
+
   s.tool(
     'set_task_parameter',
-    "Updates one or more properties of a Task (cycle time, priority, watchdog time/enable/sensitivity, stack size). Pass only the knobs you want to change; others are left untouched. Every write is read back and the call FAILS (ERR_WRITE_DID_NOT_STICK) if a requested field did not take -- fields that did apply are still saved, and the error names both sets. For AC500 V3 stack size: when set at task level fails, the script walks up to ancestor nodes; AC500 may store PLC stack config via Device parameter dict instead -- in that case use set_device_parameter once the parameter id is known (set_device_parameter does NOT auto-discover it; consult AB UI Device > PLC Settings).",
+    "Updates a Task: cycle time, priority, watchdog time/enable/sensitivity, kind, stack size, extra POU calls (addPous). Every write is read back; a knob that did not take FAILS the call (ERR_WRITE_DID_NOT_STICK). AC500 V3 stack size usually lives on the Device (set_device_parameter).",
     {
       projectFilePath: z.string().describe("Path to the project file."),
       taskName: z.string().min(1).describe("Exact name of the task as shown under Task Configuration (e.g. 'MainTask'). Use get_task_configuration to discover."),
-      cycleTimeMs: z.number().int().positive().describe("Cycle time / interval in milliseconds.").optional(),
-      watchdogTimeMs: z.number().int().positive().describe("Watchdog timeout in milliseconds. Also arms the watchdog unless watchdogEnabled is passed explicitly. NOTE: the watchdog measures EXECUTION time per cycle, not the cycle period.").optional(),
-      watchdogEnabled: z.boolean().describe("Arm (true) or disable (false) the task watchdog. Pass false when the task makes blocking calls that legitimately exceed the timeout -- e.g. NBS.ResolveHostname on a bench program -- instead of disabling it by hand in the AB task editor. Overrides the implicit arming done by watchdogTimeMs.").optional(),
-      watchdogSensitivity: z.number().int().positive().describe("Watchdog sensitivity: the number of consecutive cycles that must exceed the timeout before the watchdog trips (AC500 V3 default 1).").optional(),
-      priority: z.number().int().min(0).max(31).describe("Task priority (0 = highest, 31 = lowest on AC500 V3).").optional(),
-      stackSizeBytes: z.number().int().positive().describe("Stack size in bytes. Required when a library has large STRING(N) buffers that overflow the default ~128KB stack; common bump is 262144 (256KB).").optional(),
+      ...taskKnobs,
+      addPous: z.array(z.string().min(1)).describe("Programs to add to the task's call list (skipped if already called), e.g. ['WEB_PRG'].").optional(),
     },
-    async (args: {
-      projectFilePath: string;
-      taskName: string;
-      cycleTimeMs?: number;
-      watchdogTimeMs?: number;
-      watchdogEnabled?: boolean;
-      watchdogSensitivity?: number;
-      priority?: number;
-      stackSizeBytes?: number;
-    }) => {
-      const provided = [
-        args.cycleTimeMs !== undefined ? 'cycleTimeMs' : '',
-        args.watchdogTimeMs !== undefined ? 'watchdogTimeMs' : '',
-        args.watchdogEnabled !== undefined ? 'watchdogEnabled' : '',
-        args.watchdogSensitivity !== undefined ? 'watchdogSensitivity' : '',
-        args.priority !== undefined ? 'priority' : '',
-        args.stackSizeBytes !== undefined ? 'stackSizeBytes' : '',
-      ].filter(Boolean);
-      if (provided.length === 0) {
-        return {
-          content: [{ type: 'text' as const, text: 'Error: at least one of cycleTimeMs / watchdogTimeMs / watchdogEnabled / watchdogSensitivity / priority / stackSizeBytes must be provided.' }],
-          isError: true,
-        };
-      }
-      const escaped = resolvePath(args.projectFilePath, workspaceDir);
-      const script = scriptManager.prepareScriptWithHelpers(
-        'set_task_parameter',
-        {
-          PROJECT_FILE_PATH: escaped,
-          TASK_NAME: args.taskName.trim(),
-          CYCLE_TIME_MS: args.cycleTimeMs !== undefined ? String(args.cycleTimeMs) : '',
-          WATCHDOG_TIME_MS: args.watchdogTimeMs !== undefined ? String(args.watchdogTimeMs) : '',
-          WATCHDOG_ENABLED: args.watchdogEnabled !== undefined ? String(args.watchdogEnabled) : '',
-          WATCHDOG_SENSITIVITY: args.watchdogSensitivity !== undefined ? String(args.watchdogSensitivity) : '',
-          PRIORITY: args.priority !== undefined ? String(args.priority) : '',
-          STACK_SIZE_BYTES: args.stackSizeBytes !== undefined ? String(args.stackSizeBytes) : '',
-        },
-        ['_text_utils', 'ensure_project_open']
-      );
-      await backupManager.snapshot(escaped);
-      const result = await executor.executeScript(script);
-      // The headline only claims the requested knobs because the script now
-      // hard-fails when any of them did not take -- on success, requested ==
-      // applied. Previously this line asserted every knob was updated even
-      // when the script had quietly skipped one.
-      return formatToolResponse(
-        result,
-        `Task '${args.taskName}' updated (${provided.join(', ')}) in ${args.projectFilePath}.`
-      );
-    }
+    async (args: TaskArgs) => runTaskScript(args, false)
+  );
+
+  s.tool(
+    'create_task',
+    "Creates a task in the active application's Task Configuration (kind, interval, priority, watchdog) and adds its POU calls, all read back and saved. Fails if it exists.",
+    {
+      projectFilePath: z.string().describe("Path to the project file."),
+      taskName: z.string().min(1).describe("Name of the new task (e.g. 'WebTask'). A new task starts with AB's defaults (live AB 2.9 AC500 V3: cyclic t#10ms, priority 14, watchdog ON t#20ms, sensitivity 1) -- pass the knobs you need, e.g. watchdogEnabled=false for a task that makes blocking calls."),
+      ...taskKnobs,
+      pous: z.array(z.string().min(1)).describe("Programs the task calls, in order (e.g. ['WEB_PRG']). A name not found in the project tree is reported as a warning (it may be a library program); compile_project is the final check.").optional(),
+    },
+    async (args: TaskArgs) => runTaskScript({ kind: 'cyclic', ...args }, true)
   );
 
   s.tool(
@@ -2933,10 +3033,10 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   s.tool(
     'remove_library',
-    "Removes a library REFERENCE from the project's Library Manager (the project stops referencing it; the machine-wide repository is untouched -- for that use uninstall_library_from_repository). Works even on builds where references are not enumerable child objects (uses ScriptLibManObject.get_libraries/remove_library). System '#'-prefixed references are refused. Accepts the exact display string ('MyLib, * (Vendor)') or an unambiguous substring ('MyLib').",
+    "Removes a library REFERENCE (placeholder '#X' or managed 'X, 1.0 (Vendor)') from the project's Library Managers; the repository is untouched. System references are refused.",
     {
       projectFilePath: z.string().describe("Path to the project file."),
-      libraryName: z.string().min(1).describe("Library reference to remove: exact display string or unambiguous substring (case-insensitive)."),
+      libraryName: z.string().min(1).describe("Reference to remove, case-insensitive: the display string ('#LogiQ', 'MyLib, 1.0.0 (Vendor)'), the name without '#', the base name ('AC500-V3-utilities-web'), what a placeholder resolves to ('MProtocol-library'), the list_project_libraries form, or an unambiguous substring. Only system_library=True references (added by the device/plug-ins: IoDrv*, Standard, #System_Visu*) are refused -- '#' alone just means placeholder."),
     },
     async (args: { projectFilePath: string; libraryName: string }) => {
       const escaped = resolvePath(args.projectFilePath, workspaceDir);
@@ -2960,9 +3060,9 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   s.tool(
     'install_library_to_repository',
-    "Installs the currently open .library project into the CODESYS Library Repository, equivalent to the UI menu 'File > Save Project and Install into Library Repository'. Required after editing a library project so consumer projects (referencing it via Library Manager) pick up the new version. If a library with the same name+version already exists in the repository, it is overwritten; different versions are installed alongside.",
+    "Installs a .library file into the Library Repository (overwrites the same version). Saves first only if it is the open project with unsaved edits; Released libraries work.",
     {
-      libraryProjectFilePath: z.string().describe("Path to the .library project file to install."),
+      libraryProjectFilePath: z.string().describe("Path to the .library file to install. If it is not the open project it is installed straight from disk without opening it (the user's open project is not switched). If it is open: saved only when dirty -- a Released library opens read-only, so it is installed as saved."),
       repositoryName: z.string().describe("Optional name of the target repository (e.g. 'User', 'Default'). If omitted, the script picks the User repository if available, otherwise the first repository.").optional(),
     },
     async (args: { libraryProjectFilePath: string; repositoryName?: string }) => {
@@ -3006,10 +3106,10 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   s.tool(
     'get_library_parameters',
-    "Returns the Library Parameters (consumer-overridable VAR_GLOBAL CONSTANT values from Parameter List POUs) exposed by each library reference in the project's Library Manager. For each parameter: name, current effective value, library default value, isOverridden flag, type, comment. Use to diagnose 'consumer override vs lib default' confusion: if isOverridden=true but the override is stale relative to the new library default, call reset_library_parameter. Returns a diagnostic dump if the CODESYS scripting API on this build does not expose parameter access (worth forwarding to maintainers).",
+    "Library Parameters per reference: the project's overrides; with libraryName also the library's declared parameters and defaults (read from its .library source).",
     {
       projectFilePath: z.string().describe("Path to the consumer .project file."),
-      libraryName: z.string().describe("Optional library name filter (e.g. 'NexoMqttLib'). Case-insensitive substring match.").optional(),
+      libraryName: z.string().describe("Library filter, case-insensitive substring of the reference ('AC500-V3-utilities-web', '#Util'). With a filter the library's own parameter list and defaults are read too (not possible for a compiled library); without one only references that carry overrides are listed.").optional(),
     },
     async (args: { projectFilePath: string; libraryName?: string }) => {
       const escaped = resolvePath(args.projectFilePath, workspaceDir);
@@ -3028,11 +3128,11 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   s.tool(
     'set_library_parameter',
-    "Set a consumer-side override for a Library Parameter (overrides the library's default VAR_GLOBAL CONSTANT value). Persists in the consumer .project file. Use to pin a value the library default doesn't match (e.g. raise GC_MAX_TAG_DEFINITIONS). For the canonical value declared by the library itself, edit the Parameter List POU in the library source instead.",
+    "Sets a consumer-side Library Parameter override (e.g. gc_udiPageMax := 65536), read back and saved. The name is checked against the library source when readable.",
     {
       projectFilePath: z.string().describe("Path to the consumer .project file."),
-      libraryName: z.string().min(1).describe("Library name (must match a Library Manager reference)."),
-      parameterName: z.string().min(1).describe("Parameter name (e.g. 'GC_MAX_TAG_DEFINITIONS')."),
+      libraryName: z.string().min(1).describe("Library reference: display string, base name ('AC500-V3-utilities-web'), placeholder name ('Util') or unambiguous substring."),
+      parameterName: z.string().min(1).describe("Parameter name, case-insensitive (e.g. 'gc_udiPageMax'). The scripting API accepts ANY name, so for a .library source it is validated against the declared constants (ERR_LIB_PARAM_NOT_FOUND otherwise); for a compiled library it cannot be and the result says nameValidated=false."),
       value: z.string().describe("New value as a string (e.g. '1024', 'TRUE', \"'foo'\"). Use the IEC literal form the parameter expects."),
     },
     async (args: { projectFilePath: string; libraryName: string; parameterName: string; value: string }) => {

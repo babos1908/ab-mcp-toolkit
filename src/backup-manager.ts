@@ -176,12 +176,19 @@ export class BackupManager {
    * delete the rest. Only `<basename>.backup-<TS>Z` files are ever deleted;
    * manual `<name>.backup` and unrelated files are never touched.
    *
+   * An EXPLICIT keep=0 deletes every auto-backup (it used to be read as
+   * "unbounded" like the retention setting, so cleanup_backups(keep=0)
+   * answered "removed 0" -- 2026-10-17). Only the DEFAULT, taken from a
+   * retention <= 0 (= unbounded), means "keep everything".
+   *
    * @param dir directory to sweep (typically the project folder)
    * @param keep how many newest backups to keep per source (default: retention)
    * @returns summary of what was removed
    */
   cleanupDir(dir: string, keep?: number): { examined: number; removed: number; kept: number; perFile: Array<{ source: string; removed: number; kept: number }> } {
-    const keepN = keep === undefined ? this.retention : keep;
+    const keepN = keep !== undefined
+      ? Math.max(0, Math.floor(keep))
+      : this.retention <= 0 ? Infinity : this.retention;
     const summary = { examined: 0, removed: 0, kept: 0, perFile: [] as Array<{ source: string; removed: number; kept: number }> };
     let entries: string[] = [];
     try {
@@ -203,7 +210,7 @@ export class BackupManager {
     for (const [source, list] of bySource) {
       summary.examined += list.length;
       list.sort((a, b) => (a.name < b.name ? 1 : a.name > b.name ? -1 : 0)); // newest first
-      const toRemove = keepN <= 0 ? [] : list.slice(keepN);
+      const toRemove = list.slice(keepN);
       let removedHere = 0;
       for (const b of toRemove) {
         try {

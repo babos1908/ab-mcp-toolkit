@@ -7,6 +7,50 @@ TITLE       = """{TITLE}"""
 AUTHOR      = """{AUTHOR}"""
 COMPANY     = """{COMPANY}"""
 DESCRIPTION = """{DESCRIPTION}"""
+# 'true' / 'false' / '' (= leave the Released flag alone). Routed through
+# opt_placeholder: an older server that does not know the parameter leaves the
+# literal "{RELEASED}" here, which must read as "not provided".
+RELEASED    = """{RELEASED}"""
+
+
+def _released_wanted():
+    v = opt_placeholder(RELEASED, 'RELEASED')
+    if v is None:
+        return None
+    t = _to_unicode(v).strip().lower()
+    if t in (u'true', u'1', u'yes', u'on'):
+        return True
+    if t in (u'false', u'0', u'no', u'off'):
+        return False
+    return None
+
+
+def _set_released(info, want, applied, skipped):
+    """Write info.released and verify it. Live 2026-10-17 (AB 2.9 SP19): a
+    Released project is open READ-ONLY; clearing the flag in the same session
+    makes save() work again, so released=False is applied BEFORE the other
+    fields and the save."""
+    if not hasattr(info, 'released'):
+        skipped.append({'field': 'released', 'reason': 'attribute_not_found'})
+        return
+    try:
+        before = bool(info.released)
+    except Exception:
+        before = None
+    try:
+        info.released = want
+        rb = bool(info.released)
+    except Exception as e:
+        skipped.append({'field': 'released', 'reason': 'setattr_failed', 'error': str(e)})
+        return
+    if rb != want:
+        skipped.append({'field': 'released', 'attribute': 'released', 'reason': 'write_did_not_stick',
+                        'wrote': want, 'readback': rb})
+        print("WARN: info.released did not stick: wrote %r, read back %r" % (want, rb))
+    else:
+        applied.append({'field': 'released', 'attribute': 'released', 'new_value': want,
+                        'readback': rb, 'before': before})
+        print("DEBUG: info.released = %r (verified, was %r)" % (want, before))
 
 try:
     print("DEBUG: set_project_info: Project='%s'" % PROJECT_FILE_PATH)
@@ -85,6 +129,10 @@ try:
 
     applied = []
     skipped = []
+    released_wanted = _released_wanted()
+    was_released = project_is_released(primary_project)
+    if released_wanted is False:
+        _set_released(info, False, applied, skipped)
     for label, attrs, value in field_map:
         if value == "":
             skipped.append({'field': label, 'reason': 'omitted'})
@@ -124,13 +172,24 @@ try:
         except Exception as set_err:
             skipped.append({'field': label, 'reason': 'setattr_failed', 'error': str(set_err)})
 
-    # Save so the change persists.
+    if released_wanted is True:
+        # Last, so every other field is in place before the project is marked
+        # released (saving right after setting it works in the same session).
+        _set_released(info, True, applied, skipped)
+
+    # Save so the change persists. A Released project is read-only: the
+    # helper turns that into ERR_PROJECT_READ_ONLY naming released=false as
+    # the fix (unless this very call cleared the flag, which makes it work).
     try:
-        primary_project.save()
+        save_project_checked(primary_project, "the Project Information update")
         print("DEBUG: Project saved after Project Information update.")
     except Exception as save_err:
+        if is_read_only_error(save_err) or 'READ-ONLY' in str(save_err):
+            raise
         print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
         raise RuntimeError("Failed to save project after info update: %s" % save_err)
+    if was_released is not None:
+        print("Released flag: was %s, now %s" % (was_released, project_is_released(primary_project)))
 
     print("Applied fields: %d" % len(applied))
     for a in applied:
@@ -139,6 +198,15 @@ try:
         print("Skipped fields: %d" % len(skipped))
         for s in skipped:
             print("  - %s : %s" % (s['field'], s))
+    # A field the caller asked for that did not take fails the call (fields
+    # that did apply are saved above) -- same contract as set_task_parameter.
+    failed = [s for s in skipped if s.get('reason') != 'omitted']
+    if failed:
+        print("SCRIPT_ERROR_CODE: ERR_WRITE_DID_NOT_STICK")
+        raise RuntimeError(
+            "%d requested Project Information field(s) did not take: %s. Applied and "
+            "saved: %s." % (len(failed), ', '.join(s['field'] for s in failed),
+                            ', '.join(a['field'] for a in applied) or 'none'))
     print("SCRIPT_SUCCESS: Project Information updated.")
     sys.exit(0)
 except Exception as e:

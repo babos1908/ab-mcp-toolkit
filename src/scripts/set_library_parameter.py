@@ -4,6 +4,21 @@ LIBRARY_NAME = "{LIBRARY_NAME}"
 PARAMETER_NAME = "{PARAMETER_NAME}"
 PARAMETER_VALUE = """{PARAMETER_VALUE}"""
 
+# set_library_parameter
+# ---------------------
+# Field facts (AB 2.9 SP19, live 2026-10-17 on a copy of an AC500 V3 consumer;
+# details in _text_utils next to library_parameter_overrides):
+#  * The references are found through lm.references across ALL Library
+#    Managers -- the old lookup walked lm.get_children(), which is empty on
+#    AB 2.9, so every reference was "not found" (e.g. 'AC500-V3-utilities-web').
+#  * ref.parameters lists only existing OVERRIDES; params[name] = expr writes
+#    one and is accepted for ANY name. The name is therefore validated
+#    against the constants the library source declares when the source is
+#    readable (a .library); for a .compiled-library it cannot be, and the
+#    result says so (nameValidated=false) instead of pretending.
+#  * Verified effect: gc_udiPageMax := 65536 on AC500-V3-utilities-web 1.0.0
+#    persisted across save/reopen and changed the build's memory report.
+
 try:
     print("DEBUG: set_library_parameter: Lib='%s' Param='%s' Value=%r" % (
         LIBRARY_NAME, PARAMETER_NAME, PARAMETER_VALUE))
@@ -11,195 +26,97 @@ try:
     if not LIBRARY_NAME or not PARAMETER_NAME:
         print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise ValueError("libraryName and parameterName are required.")
+    value_u = to_codesys_text(PARAMETER_VALUE).strip()
+    if not value_u:
+        # '' REMOVES the override on this API -- that is reset_library_parameter.
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
+        raise ValueError("value is empty; to drop an override use reset_library_parameter.")
 
     primary_project = ensure_project_open(PROJECT_FILE_PATH)
 
-    # Find Library Manager + the named library reference
-    lib_manager_node = None
-    try:
-        found = primary_project.find("Library Manager", True)
-        if found:
-            lib_manager_node = found[0]
-    except Exception:
-        pass
-    if lib_manager_node is None:
-        for child in primary_project.get_children(True):
-            cname = getattr(child, 'get_name', lambda: '')()
-            if cname and 'library manager' in cname.lower():
-                lib_manager_node = child
-                break
-    if lib_manager_node is None:
-        print("SCRIPT_ERROR_CODE: ERR_OBJECT_NOT_FOUND")
-        raise RuntimeError("Library Manager node not found in project.")
-
-    target_ref = None
-    for ref in lib_manager_node.get_children(False):
-        ref_name = getattr(ref, 'get_name', lambda: '')()
-        if ref_name and ref_name.strip().lower() == LIBRARY_NAME.strip().lower():
-            target_ref = ref
-            break
-    if target_ref is None:
-        print("SCRIPT_ERROR_CODE: ERR_LIB_NOT_FOUND")
-        raise RuntimeError(
-            "Library reference '%s' not found under Library Manager. Use "
-            "list_project_libraries to confirm the exact name." % LIBRARY_NAME)
-
-    # Probe parameter accessor on the reference. Same cascade as get_.
-    probe_attrs = (
-        'parameters', 'parameter', 'get_parameters', 'get_all_parameters',
-        'overridden_parameters', 'placeholders',
-    )
-    params_collection = None
-    accessor_used = None
-    for attr in probe_attrs:
-        if hasattr(target_ref, attr):
-            try:
-                v = getattr(target_ref, attr)
-                cand = v() if callable(v) else v
-                if cand is not None:
-                    params_collection = cand
-                    accessor_used = attr
-                    break
-            except Exception:
-                pass
-
-    if params_collection is None:
+    entries = library_reference_entries(primary_project)
+    entry, err = resolve_library_reference(entries, LIBRARY_NAME)
+    if entry is None:
+        print("SCRIPT_ERROR_CODE: %s" % ('ERR_BAD_INPUT' if err.startswith('Ambiguous') else 'ERR_LIB_NOT_FOUND'))
+        raise RuntimeError(err)
+    ref = entry['_ref']
+    display = entry['display']
+    if ref is None or library_parameter_names(ref) is None:
         print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
         raise RuntimeError(
-            "No library-parameter accessor on this build. Run "
-            "get_library_parameters and forward the diagnostic dump."
-        )
+            "Reference '%s' exposes no library-parameter accessor on this build "
+            "(lm.references / ref.parameters)." % display)
 
-    # Locate the target parameter slot by name.
-    target_slot = None
-    target_key = None
-    # Try dict-style by-name access first.
-    try:
-        if hasattr(params_collection, '__getitem__'):
-            try:
-                target_slot = params_collection[PARAMETER_NAME]
-                target_key = PARAMETER_NAME
-            except Exception:
-                pass
-    except Exception:
-        pass
-    if target_slot is None:
-        # Iterate.
-        keys = []
-        try:
-            keys = list(params_collection.keys())
-        except Exception:
-            try:
-                keys = list(iter(params_collection))
-            except Exception:
-                keys = []
-        for k in keys:
-            slot = k
-            if hasattr(params_collection, '__getitem__'):
-                try:
-                    slot = params_collection[k]
-                except Exception:
-                    pass
-            slot_name = None
-            for nattr in ('name', 'get_name', 'identifier'):
-                if hasattr(slot, nattr):
-                    try:
-                        v = getattr(slot, nattr)
-                        slot_name = v() if callable(v) else v
-                    except Exception:
-                        pass
-                    break
-            if slot_name is None and isinstance(k, (str, unicode)):
-                slot_name = k
-            if slot_name and str(slot_name).strip() == PARAMETER_NAME.strip():
-                target_slot = slot
-                target_key = k
-                break
+    overrides = library_parameter_overrides(ref)
+    decls, decl_source, decl_note = library_parameter_declarations(entry)
 
-    if target_slot is None:
-        print("SCRIPT_ERROR_CODE: ERR_LIB_PARAM_NOT_FOUND")
-        raise RuntimeError(
-            "Parameter '%s' not exposed by library '%s'." % (PARAMETER_NAME, LIBRARY_NAME))
-
-    # Write the value. Try multiple set/property patterns.
-    # Decode bytes->unicode before writing -- prevents Unicode->NUL
-    # corruption through the System.String binding when the value contains
-    # non-ASCII chars (e.g. a STRING(N) library parameter with unicode
-    # content). See _text_utils.to_codesys_text.
-    PARAMETER_VALUE_U = to_codesys_text(PARAMETER_VALUE)
-    written = False
-    last_err = None
-    # 1. slot.value = X
-    if not written and hasattr(target_slot, 'value'):
-        try:
-            target_slot.value = PARAMETER_VALUE_U
-            written = True
-        except Exception as e:
-            last_err = "slot.value=...: %s: %s" % (type(e).__name__, e)
-    # 2. slot.set_value(X)
-    if not written and hasattr(target_slot, 'set_value'):
-        try:
-            target_slot.set_value(PARAMETER_VALUE_U)
-            written = True
-        except Exception as e:
-            last_err = (last_err or '') + " | slot.set_value(): %s: %s" % (type(e).__name__, e)
-    # 3. collection[name] = X (dict-style overwrite)
-    if not written and hasattr(params_collection, '__setitem__'):
-        try:
-            params_collection[target_key] = PARAMETER_VALUE
-            written = True
-        except Exception as e:
-            last_err = (last_err or '') + " | collection[k]=...: %s: %s" % (type(e).__name__, e)
-
-    if not written:
-        print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
-        raise RuntimeError(
-            "Could not write parameter '%s'. Tried slot.value, slot.set_value, "
-            "collection[key]. Last error: %s" % (PARAMETER_NAME, last_err))
-
-    # Read-back verification: assigning to a typed CODESYS parameter slot's
-    # '.value' can be accepted without raising yet silently NOT stick (e.g. a
-    # type-coercion no-op, or a read-only/locked override) -- the recurring
-    # "lying success" failure mode. Re-read the slot and compare to what we
-    # wrote; FAIL LOUDLY on mismatch so the caller doesn't trust an override
-    # that never took (only discovered later on the running PLC otherwise).
-    readback = None
-    readback_err = None
-    try:
-        rv = getattr(target_slot, 'value', None)
-        readback = _to_unicode(unicode(rv)) if rv is not None else None
-    except Exception as re_err:
-        readback_err = str(re_err)
-    if readback is not None:
-        want = _to_unicode(unicode(PARAMETER_VALUE_U)).strip()
-        got = readback.strip()
-        if got != want:
-            print("SCRIPT_ERROR_CODE: ERR_WRITE_DID_NOT_STICK")
+    # Pick the parameter's real name. IEC is case-insensitive; prefer the
+    # library's own spelling, then an existing override's.
+    param_name = None
+    name_validated = False
+    declared = None
+    if decls is not None:
+        hit = find_name_ci([d['name'] for d in decls], PARAMETER_NAME)
+        if hit is not None:
+            param_name = hit
+            name_validated = True
+            declared = [d for d in decls if d['name'] == hit][0]
+        elif find_name_ci(overrides.keys(), PARAMETER_NAME) is None:
+            print("SCRIPT_ERROR_CODE: ERR_LIB_PARAM_NOT_FOUND")
             raise RuntimeError(
-                "Parameter '%s' write did not stick: wrote %r but read back %r "
-                "(accessor: %s). The scripting API accepted the assignment but it "
-                "had no effect -- the slot may be a different type or locked." % (
-                    PARAMETER_NAME, want, got, accessor_used))
-    else:
-        # Couldn't read back -- can't confirm. Surface as a warning, not a hard
-        # fail (some slots are write-only / not re-readable), so the caller
-        # knows the value is unverified.
-        print("WARN: could not read back parameter '%s' to verify the write%s" % (
-            PARAMETER_NAME, (": %s" % readback_err) if readback_err else ""))
+                "Library '%s' declares no parameter '%s' (read from %s). Declared "
+                "constants: %s. The scripting API would accept the name anyway and "
+                "create an override that does nothing, so it was not written."
+                % (display, PARAMETER_NAME, decl_source,
+                   u', '.join(d['name'] for d in decls) or u'(none)'))
+    if param_name is None:
+        param_name = find_name_ci(overrides.keys(), PARAMETER_NAME) or PARAMETER_NAME.strip()
+        if decls is None:
+            print("WARN: parameter name not validated (%s)" % decl_note)
 
-    # Save so the override persists.
+    previous = overrides.get(find_name_ci(overrides.keys(), param_name)) if overrides else None
+
+    ref.parameters[param_name] = value_u
+    print("DEBUG: %s.parameters[%s] = %r" % (display, param_name, value_u))
+
+    # Read back through a FRESH reference object, so a wrapper caching the
+    # value cannot hide a write that did not reach the project.
+    readback = None
     try:
-        primary_project.save()
-    except Exception as se:
-        print("WARN: project.save() raised: %s" % se)
+        fresh = entry['_lm'].references[display]
+        readback = library_parameter_value(fresh, param_name)
+    except Exception as rb_err:
+        print("DEBUG: fresh re-read failed (%s); using the same reference" % rb_err)
+        readback = library_parameter_value(ref, param_name)
+    if readback is None or readback.strip() != value_u:
+        print("SCRIPT_ERROR_CODE: ERR_WRITE_DID_NOT_STICK")
+        raise RuntimeError(
+            "Parameter '%s' of '%s': wrote %r but read back %r. Nothing was saved."
+            % (param_name, display, value_u, readback))
 
-    emit_result({
-        u'library': _to_unicode(LIBRARY_NAME),
-        u'parameter': _to_unicode(PARAMETER_NAME),
-        u'newValue': _to_unicode(PARAMETER_VALUE),
+    save_project_checked(primary_project, "the library parameter override")
+
+    result = {
+        u'library': display,
+        u'libraryManager': entry['manager'],
+        u'parameter': _to_unicode(param_name),
+        u'newValue': value_u,
         u'valueReadback': readback,
-        u'accessorUsed': _to_unicode(accessor_used),
-    })
+        u'previousOverride': previous,
+        u'libraryDefault': declared['defaultValue'] if declared else None,
+        u'type': declared['type'] if declared else None,
+        u'nameValidated': name_validated,
+    }
+    if not name_validated:
+        why = decl_note if decls is None else (
+            "not declared in the library source, but an override with this name "
+            "already existed")
+        result[u'warning'] = (
+            u"The parameter name could not be checked against the library (%s). "
+            u"The API accepts any name, so a typo would be a silent no-op "
+            u"override: confirm the effect in the build (compile_project memory "
+            u"report) or in the AB Library Manager." % _to_unicode(why))
+    emit_result(result)
     print("SCRIPT_SUCCESS: Library parameter override set.")
     sys.exit(0)
 except Exception as e:

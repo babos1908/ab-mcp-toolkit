@@ -99,8 +99,9 @@ Environment variables `CODESYS_PATH` and `CODESYS_PROFILE` are used as defaults 
 | `open_project` | Open an existing CODESYS project file |
 | `create_project` | Create a new project from the standard template |
 | `save_project` | Save the currently open project |
-| `compile_project` | Build the primary application with structured error output (120s timeout) |
-| `get_compile_messages` | Retrieve last compiler messages without triggering a new build |
+| `compile_project` | Build the active application: errors/warnings, the build memory report (`memoryUsage`: user program, downloadable size, memory areas) and which `.compileinfo`/`.bootinfo` files `clean()` removed. `incremental=true` skips `clean()` (120s timeout) |
+| `get_compile_messages` | Retrieve the last build's messages and memory report without triggering a new build |
+| `create_task` / `set_task_parameter` | Create a task (kind, interval, priority, watchdog, POU calls) or change one; every knob is read back |
 
 ### POU / Code Authoring Tools
 
@@ -139,7 +140,10 @@ Environment variables `CODESYS_PATH` and `CODESYS_PROFILE` are used as defaults 
 
 | Tool | Description |
 |------|-------------|
-| `list_project_libraries` | List all libraries referenced in the project with version info |
+| `list_project_libraries` | List the references of every Library Manager, marking placeholders (`#X -> resolved library`) and system references |
+| `remove_library` | Remove a library reference (placeholder or managed); only system references are refused |
+| `get_library_parameters` / `set_library_parameter` / `reset_library_parameter` | Consumer-side library parameter overrides; names and defaults read from the library source when it is a `.library` |
+| `install_library_to_repository` | Install a `.library` file into the repository; works for Released libraries and does not switch the open project |
 | `add_library` | Add a library reference to the project. The library must be installed in the local CODESYS repository. pass the fully-qualified placeholder name (e.g. `Standard, * (System)`) - bare names like `Util` won't resolve |
 
 ### Device-Tree Tools

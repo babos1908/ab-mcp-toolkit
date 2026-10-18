@@ -26,7 +26,17 @@ COMPILE_CATEGORY_GUIDS = [
     '97F48D64-A2A3-4856-B640-75C046E37EA9',  # Build
     '220493A1-F49B-4416-9A3F-A545DB707CBE',  # Additional code checks
     '217BC73E-759B-4A3C-BFA1-991C938A6541',  # Precompile
+    'EE56DA69-D42B-478E-BD3C-2B4494E512C6',  # Memory Usage (info lines only)
 ]
+
+# 'true' = incremental build: skip target_app.clean(). Default (also when an
+# older server leaves the literal placeholder) = the historical clean build.
+# Live 2026-10-17 (AB 2.9 SP19): clean() deletes the
+# <project>.<Device>.<App>.<guid>.compileinfo / .bootinfo / .bootinfo_guids
+# files next to the project (tracked in git in several repos, and what online
+# change needs) and a scripted build -- even a successful one -- does NOT
+# rewrite them; only a download / online change / boot application does.
+INCREMENTAL = "{INCREMENTAL}"
 
 # --- Stable post-mortem debug file ---
 # Mirror every print() this script emits to a file at a deterministic
@@ -265,24 +275,33 @@ try:
     #   - application: clean() + build() + generate_code() on the app node
     #   - library:     Check-all-Pool-Objects path (no Application exists)
     build_invoked = False
+    incremental = _to_unicode(opt_placeholder(INCREMENTAL, 'INCREMENTAL')).strip().lower() in (
+        u'true', u'1', u'yes', u'on')
+    cache_before = build_cache_files(PROJECT_FILE_PATH)
+    cache_after_clean = None
 
     if project_kind == "application":
-        # Force a full rebuild by invalidating any precompile cache. Bigger
-        # projects ship a `<name>.precompilecache` file; when valid, the
-        # runtime may skip the semantic check entirely and emit zero errors
-        # for code the UI would flag.
-        if hasattr(target_app, 'clean'):
+        # Historical default: clean() first, meant to invalidate a precompile
+        # cache that could hide semantic errors. Note (live 2026-10-17): it
+        # does not delete <name>.precompilecache, and a build right after it
+        # can still answer "The application is up to date"; what it does
+        # delete are the .compileinfo/.bootinfo files (see INCREMENTAL).
+        if incremental:
+            print("DEBUG: incremental build: target_app.clean() skipped.")
+        if not incremental and hasattr(target_app, 'clean'):
             try:
                 target_app.clean()
                 print("DEBUG: target_app.clean() executed for '%s'." % app_name)
             except Exception as clean_err:
                 print("WARN: target_app.clean() raised: %s" % clean_err)
-        if hasattr(target_app, 'clean_all'):
+        if not incremental and hasattr(target_app, 'clean_all'):
             try:
                 target_app.clean_all()
                 print("DEBUG: target_app.clean_all() executed for '%s'." % app_name)
             except Exception as clean_err:
                 print("WARN: target_app.clean_all() raised: %s" % clean_err)
+        if not incremental:
+            cache_after_clean = build_cache_files(PROJECT_FILE_PATH)
 
         # Call BOTH build() (F11 semantic check) and generate_code() (codegen).
         # On bigger applications generate_code() alone can short-circuit and
@@ -468,6 +487,25 @@ try:
     # histogram unconditionally for diagnostic purposes (even when empty)
     # so the watcher.log captures the full state.
     seen_keys = set()
+    # Info-severity lines kept apart from errors/warnings: the memory report
+    # and the "Build complete -- ..." summary (structured on the TS side).
+    memory_lines = []
+    build_summary = []
+
+    def _note_info(msg):
+        try:
+            t = _to_unicode(getattr(msg, 'text', None))
+        except Exception:
+            return
+        if not t:
+            return
+        if is_memory_usage_line(t):
+            if t not in memory_lines:
+                memory_lines.append(t)
+        elif t.strip().lower().startswith(u'build complete'):
+            if t not in build_summary:
+                build_summary.append(t)
+
     for cat_guid, cat_name in all_categories:
         try:
             cat_msgs = script_engine.system.get_message_objects(cat_guid)
@@ -481,6 +519,7 @@ try:
                 sev_str = _sev_to_string(sev_raw)
                 counts[sev_str] = counts.get(sev_str, 0) + 1
                 if sev_str not in KEEP_SEVS:
+                    _note_info(msg)
                     continue
                 collected_in_cat += 1
                 entry = _build_entry(msg, cat_name_override=cat_name)
@@ -510,6 +549,7 @@ try:
                     sev_str = _sev_to_string(sev_raw)
                     global_counts[sev_str] = global_counts.get(sev_str, 0) + 1
                     if sev_str not in KEEP_SEVS:
+                        _note_info(msg)
                         continue
                     entry = _build_entry(msg, cat_name_override='(global)')
                     key = (None, entry.get('text'), entry.get('object'), entry.get('line'))
@@ -546,6 +586,23 @@ try:
     sys.stdout.write(messages_json_bytes)
     sys.stdout.write("\n### COMPILE_MESSAGES_END ###\n")
     sys.stdout.flush()
+
+    cache_after = build_cache_files(PROJECT_FILE_PATH)
+    emit_result({
+        u'incremental': incremental,
+        u'memoryLines': memory_lines,
+        u'buildSummary': build_summary,
+        u'cacheFiles': {
+            u'before': cache_before,
+            u'afterClean': cache_after_clean,
+            u'after': cache_after,
+            u'removed': [f for f in cache_before if f not in cache_after],
+        },
+    })
+    for t in build_summary:
+        print("Build summary: %s" % t)
+    for t in memory_lines:
+        print("Memory: %s" % t)
 
     print("Compile Initiated For Application: %s" % app_name)
     print("In Project: %s" % project_name)

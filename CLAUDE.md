@@ -115,6 +115,9 @@ The `add_device.py`, `set_device_parameter.py`, `list_device_repository.py`, `cr
 9. **DUT names with `.`** are rejected by CODESYS. Don't use dots in identifier names (they're parsed as namespace separators).
 10. **`set_pou_code` content not formatted for diff inspection.** Every successful call hits disk and the project file's XML changes. There's no staging. Always read before overwriting; keep prior content in conversation context.
 11. **`is_simulation_mode` getter returns `None`** on the ifm AE3100 device descriptor (and probably others). The setter works; verification has to come from compile + Online -> Login working.
+12. **`npm run build` changes the scripts under every running server, not the handlers.** The global `codesys-mcp-persistent` is `npm link`ed to this repo, so other Claude Code sessions pick up new `.py` templates on their next call while keeping their old TS handlers until restarted. A new placeholder must go through `opt_placeholder()` and fall back to the old behaviour; code shared by several scripts goes into `_text_utils.py` (every handler prepends it) -- a NEW helper file is only prepended by new handlers, so the script would NameError in the old ones.
+13. **Library Manager on AB 2.9**: references are not child objects -- use `lm.references` (see `_text_utils.library_reference_entries`), across ALL Library Managers (an application project has two). `#` means placeholder, not system (`system_library` says that). `ref.parameters` lists only the project's overrides and accepts any name on write.
+14. **Real API shapes are in the stubs**: `C:\Program Files\ABB\AB2.9\AutomationBuilder\ScriptLib\Stubs\scriptengine\*.pyi` -- read them before adding a probe cascade. Internal assemblies cannot be imported from a script (`Access to module ... not permitted`).
 
 ## Development workflow
 
@@ -125,7 +128,7 @@ pwsh dev/check-scripts.ps1
 # Build (cleans dist/, runs tsc, copies scripts/)
 npm run build
 
-# All tests (39 currently)
+# All tests (90 currently; the fake-engine suite needs a CPython 2.7, AB ships one)
 npm test
 
 # Type check only

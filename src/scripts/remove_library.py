@@ -6,13 +6,18 @@ import sys, scriptengine as script_engine, os, traceback
 # stops referencing the library; the machine repository is untouched -- for
 # that, see uninstall_library_from_repository).
 #
-# Mechanism (field-validated 2026-06-12 on an AC500 V3 consumer project):
-# ScriptLibManObject exposes get_libraries(recursive: bool) -> IList[str] and
-# remove_library(name: str) directly on the Library Manager object, and they
-# work even on builds where the manager has 0 enumerable children (references
-# are NOT child objects there, which is why delete_object can't reach them).
-# Display names look like 'MyLib, * (Vendor)'; system references are
-# '#'-prefixed and are refused as removal targets.
+# Mechanism (field-validated 2026-06-12 and 2026-10-17 on AC500 V3 consumers):
+# ScriptLibManObject.references / get_libraries() / remove_library() work even
+# though the references are not child objects. The reference lookup and the
+# placeholder-vs-system distinction live in _text_utils
+# (library_reference_entries / resolve_library_reference).
+#
+# 2026-10-17 regression this fixes: the old script refused EVERY '#'-prefixed
+# reference as "system", but '#' only marks a PLACEHOLDER. On a real AC500 V3
+# project all user libraries added by name are placeholders ('#LogiQ',
+# '#MProtocol', '#AC500-V3-library-MQTT'), so nothing could be removed. Only
+# references with system_library=True (added implicitly by the device or a
+# plug-in: IoDrv*, Standard, '#System_Visu*') are refused now.
 
 LIBRARY_NAME = "{LIBRARY_NAME}"
 
@@ -24,81 +29,64 @@ try:
 
     primary_project = ensure_project_open(PROJECT_FILE_PATH)
 
-    lm = None
-    try:
-        found = primary_project.find('Library Manager', True)
-        if found:
-            lm = found[0]
-    except Exception as find_err:
-        print("DEBUG: find('Library Manager') raised: %s" % find_err)
-    if lm is None:
-        for child in primary_project.get_children(True):
-            cname = getattr(child, 'get_name', lambda: '')()
-            if cname and 'library manager' in cname.lower():
-                lm = child
-                break
-    if lm is None:
+    entries = library_reference_entries(primary_project)
+    if not entries and not library_managers(primary_project):
         print("SCRIPT_ERROR_CODE: ERR_OBJECT_NOT_FOUND")
         raise RuntimeError("Library Manager node not found in project.")
 
-    if not hasattr(lm, 'get_libraries') or not hasattr(lm, 'remove_library'):
-        print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
-        raise RuntimeError(
-            "Library Manager object does not expose get_libraries/remove_library "
-            "on this build. Remove the reference from the AB UI (Library Manager "
-            "-> right-click the reference -> Remove).")
-
-    before = [_to_unicode(x) for x in lm.get_libraries(False)]
-    print("DEBUG: references before: %s" % u', '.join(before))
-
-    # Match: exact display string first, then case-insensitive substring on
-    # the non-hidden references ('#'-prefixed = system, never auto-removed).
-    wanted = LIBRARY_NAME.strip()
-    target = None
-    if wanted in before:
-        target = wanted
-    else:
-        matches = [n for n in before
-                   if not n.startswith(u'#') and wanted.lower() in n.lower()]
-        if len(matches) == 1:
-            target = matches[0]
-        elif len(matches) > 1:
-            print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
-            raise RuntimeError(
-                "Ambiguous libraryName '%s': matches %s. Pass the exact display "
-                "string." % (wanted, u' | '.join(matches)))
-
+    target, err = resolve_library_reference(entries, LIBRARY_NAME)
     if target is None:
-        print("SCRIPT_ERROR_CODE: ERR_LIB_NOT_FOUND")
-        raise RuntimeError(
-            "No project reference matches '%s'. Current references: %s"
-            % (wanted, u', '.join(before) if before else '(none)'))
-    if target.startswith(u'#'):
+        print("SCRIPT_ERROR_CODE: %s" % ('ERR_BAD_INPUT' if err.startswith('Ambiguous') else 'ERR_LIB_NOT_FOUND'))
+        raise RuntimeError(err)
+
+    display = target['display']
+    if target['isSystem']:
         print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
         raise RuntimeError(
-            "'%s' is a system reference (hidden, '#'-prefixed); refusing to "
-            "remove it -- doing so would break the target support." % target)
-
-    lm.remove_library(target)
-    print("DEBUG: remove_library('%s') returned." % target)
-
-    after = [_to_unicode(x) for x in lm.get_libraries(False)]
-    still_there = target in after
-    if still_there:
+            "'%s' is a SYSTEM library reference (added implicitly by the device or "
+            "a plug-in, system_library=True); refusing to remove it -- the device "
+            "or plug-in needs it and would re-add it or stop building." % display)
+    if target['isSystem'] is None and target['isPlaceholder']:
+        # Builds without lm.references cannot tell a user placeholder from a
+        # system one; keep the old conservative behaviour there.
         print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
         raise RuntimeError(
-            "remove_library() returned but '%s' is still referenced. "
-            "Remove it from the AB UI." % target)
+            "'%s' is a placeholder and this build does not expose system_library "
+            "to tell a user placeholder from a system one; remove it from the AB "
+            "UI (Library Manager -> right-click -> Delete)." % display)
 
-    primary_project.save()
+    lm = target['_lm']
+    if not hasattr(lm, 'remove_library'):
+        print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
+        raise RuntimeError(
+            "Library Manager object does not expose remove_library on this build. "
+            "Remove the reference from the AB UI (Library Manager -> right-click "
+            "the reference -> Delete).")
+
+    before = [_to_unicode(x) for x in lm.get_libraries(False)]
+    # remove_library wants the display name WITH the '#' for a placeholder
+    # (the bare name raises KeyError -- live 2026-10-17).
+    lm.remove_library(display)
+    print("DEBUG: remove_library('%s') returned." % display)
+
+    after = [_to_unicode(x) for x in lm.get_libraries(False)]
+    if display in after:
+        print("SCRIPT_ERROR_CODE: ERR_WRITE_DID_NOT_STICK")
+        raise RuntimeError(
+            "remove_library() returned but '%s' is still referenced. "
+            "Remove it from the AB UI." % display)
+
+    save_project_checked(primary_project, "the library reference removal")
     print("DEBUG: project saved.")
 
     emit_result({
-        u'removed': _to_unicode(target),
+        u'removed': display,
+        u'reference': library_entry_public(target),
+        u'libraryManager': target['manager'],
         u'referencesBefore': before,
         u'referencesAfter': after,
     })
-    print("Removed library reference: %s" % target)
+    print("Removed library reference: %s" % display)
     print("SCRIPT_SUCCESS: Library reference removed.")
     sys.exit(0)
 except Exception as e:

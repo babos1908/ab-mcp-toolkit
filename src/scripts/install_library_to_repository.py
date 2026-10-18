@@ -8,19 +8,56 @@ REPOSITORY_NAME = "{REPOSITORY_NAME}"
 try:
     print("DEBUG: install_library_to_repository: Project='%s' Repository='%s'" % (
         PROJECT_FILE_PATH, REPOSITORY_NAME))
-    primary_project = ensure_project_open(PROJECT_FILE_PATH)
 
     if not PROJECT_FILE_PATH.lower().endswith('.library'):
         print("WARN: Project path does not end with .library. The repository may reject the install.")
 
-    # Save the project FIRST so the install reflects the latest edits.
+    # The install reads the library FILE (install_library(path, repo, ...)), so
+    # the project only needs to be open to flush unsaved edits into that file.
+    # Live-verified 2026-10-17 (AB 2.9 SP19): install_library() works both with
+    # the library open and with it closed.
+    #
+    # The old script always opened the project (closing whatever the user had
+    # as primary) and always saved it. A Released library opens READ-ONLY and
+    # save() raises "opened in read-only mode" even with nothing to save, so
+    # every released library (MProtocol 1.0.0, LogiQ 0.0.2) failed to install
+    # and had to go through Tools > Library Repository > Install.
+    #   * library is the primary project -> save only if dirty;
+    #   * otherwise -> install straight from the file, nothing is opened.
+    target_norm = os.path.normcase(os.path.abspath(clean_path(PROJECT_FILE_PATH)))
+    if not os.path.exists(clean_path(PROJECT_FILE_PATH)):
+        print("SCRIPT_ERROR_CODE: ERR_PROJECT_NOT_FOUND")
+        raise RuntimeError("Library file not found: %s" % PROJECT_FILE_PATH)
+    primary_project = None
     try:
-        if hasattr(primary_project, 'save'):
-            primary_project.save()
-            print("DEBUG: primary_project.save() succeeded before install.")
-    except Exception as save_err:
-        print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
-        raise RuntimeError("Failed to save project before install: %s" % save_err)
+        cur = script_engine.projects.primary
+        if cur is not None and os.path.normcase(os.path.abspath(cur.path)) == target_norm:
+            primary_project = cur
+    except Exception as prim_err:
+        print("DEBUG: could not read the primary project: %s" % prim_err)
+
+    save_action = 'not open: installed from the file as saved on disk'
+    if primary_project is not None:
+        dirty = True
+        try:
+            dirty = bool(primary_project.dirty)
+        except Exception:
+            pass
+        if not dirty:
+            save_action = 'open, no unsaved changes: save skipped'
+        else:
+            # Unsaved edits must reach the file or the install would publish
+            # the old content. On a read-only (Released) library this raises
+            # ERR_PROJECT_READ_ONLY with the fix in the message.
+            save_project_checked(primary_project, "the library before installing it")
+            save_action = 'open with unsaved changes: saved before install'
+    print("DEBUG: %s" % save_action)
+    released = project_is_released(primary_project) if primary_project is not None else None
+    # Argument variants for the legacy install entry points below: the file
+    # path always, the project object only when it is actually open.
+    _install_arg_variants = [(PROJECT_FILE_PATH,)]
+    if primary_project is not None:
+        _install_arg_variants.append((primary_project,))
 
     # --- Locate the library manager ---
     lib_mgr = None
@@ -156,7 +193,7 @@ try:
 
     # --- Path B: legacy single-arg install_library(path) (older builds) ---
     if new_lib is None and hasattr(lib_mgr, 'install_library'):
-        for arg_tup in ((PROJECT_FILE_PATH,), (primary_project,)):
+        for arg_tup in _install_arg_variants:
             try:
                 new_lib = lib_mgr.install_library(*arg_tup)
                 install_log.append("install_library(%s): SUCCESS -> %s" % (type(arg_tup[0]).__name__, new_lib))
@@ -166,7 +203,7 @@ try:
 
     # --- Path C: manager.install(path/project) -- alternative API name ---
     if new_lib is None and hasattr(lib_mgr, 'install'):
-        for arg_tup in ((PROJECT_FILE_PATH,), (primary_project,)):
+        for arg_tup in _install_arg_variants:
             try:
                 new_lib = lib_mgr.install(*arg_tup)
                 install_log.append("install(%s): SUCCESS -> %s" % (type(arg_tup[0]).__name__, new_lib))
@@ -214,7 +251,7 @@ try:
                     if not hasattr(repo, fn_name):
                         continue
                     fn = getattr(repo, fn_name)
-                    for arg_tup in ((PROJECT_FILE_PATH,), (primary_project,)):
+                    for arg_tup in _install_arg_variants:
                         try:
                             new_lib = fn(*arg_tup)
                             install_log.append(
@@ -281,6 +318,7 @@ try:
             break
 
     print("Library installed: %s (path=%s, location=%s)" % (PROJECT_FILE_PATH, new_lib_name, new_lib_loc))
+    print("Save step: %s%s" % (save_action, " (library is Released)" if released else ""))
     print("Attempt log:")
     for line in install_log:
         print("  %s" % line)

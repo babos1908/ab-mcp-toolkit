@@ -9,6 +9,7 @@ COMPILE_CATEGORY_GUIDS = [
     '97F48D64-A2A3-4856-B640-75C046E37EA9',  # Build
     '220493A1-F49B-4416-9A3F-A545DB707CBE',  # Additional code checks
     '217BC73E-759B-4A3C-BFA1-991C938A6541',  # Precompile
+    'EE56DA69-D42B-478E-BD3C-2B4494E512C6',  # Memory Usage (info lines only)
 ]
 
 try:
@@ -163,6 +164,25 @@ try:
     # --- Collect cached messages from every category ---
     messages = []
     seen_keys = set()
+    # Info lines kept apart from errors/warnings (same as compile_project):
+    # the build's memory report and the "Build complete -- ..." summary.
+    memory_lines = []
+    build_summary = []
+
+    def _note_info(msg):
+        try:
+            t = _to_unicode(getattr(msg, 'text', None))
+        except Exception:
+            return
+        if not t:
+            return
+        if is_memory_usage_line(t):
+            if t not in memory_lines:
+                memory_lines.append(t)
+        elif t.strip().lower().startswith(u'build complete'):
+            if t not in build_summary:
+                build_summary.append(t)
+
     for cat_guid, cat_name in all_categories:
         try:
             cat_msgs = script_engine.system.get_message_objects(cat_guid)
@@ -175,6 +195,7 @@ try:
                 sev_str = _sev_to_string(sev_raw)
                 counts[sev_str] = counts.get(sev_str, 0) + 1
                 if sev_str not in KEEP_SEVS:
+                    _note_info(msg)
                     continue
                 collected_in_cat += 1
                 entry = _build_entry(msg, cat_name_override=cat_name)
@@ -200,6 +221,7 @@ try:
                     sev_raw = getattr(msg, 'severity', None)
                     sev_str = _sev_to_string(sev_raw)
                     if sev_str not in KEEP_SEVS:
+                        _note_info(msg)
                         continue
                     entry = _build_entry(msg, cat_name_override='(global)')
                     key = (None, entry.get('text'), entry.get('object'), entry.get('line'))
@@ -228,6 +250,7 @@ try:
     sys.stdout.write(messages_json_bytes)
     sys.stdout.write("\n### COMPILE_MESSAGES_END ###\n")
     sys.stdout.flush()
+    emit_result({u'memoryLines': memory_lines, u'buildSummary': build_summary})
     print("Project Kind: %s" % project_kind)
     print("Target: %s" % app_name)
     print("Message Count: %d" % len(messages))

@@ -6,6 +6,11 @@ INPUT_PATH = "{INPUT_PATH}"
 # match the library default anyway and the override is redundant.
 SKIP_DEFAULTS = "{SKIP_DEFAULTS}"
 
+# Writes overrides through ref.parameters[name] = expr with a read-back per
+# value, resolving each libraryName with the shared lm.references lookup in
+# _text_utils (the old get_children() walk matched nothing on AB 2.9, so every
+# entry was skipped as 'not_in_target_library_manager').
+
 try:
     print("DEBUG: import_library_parameters: Input='%s' SkipDefaults='%s'" % (INPUT_PATH, SKIP_DEFAULTS))
     if not INPUT_PATH:
@@ -31,29 +36,10 @@ try:
         raise RuntimeError("'libraries' key in input is not a list.")
 
     primary_project = ensure_project_open(PROJECT_FILE_PATH)
-    lib_manager_node = None
-    try:
-        found = primary_project.find("Library Manager", True)
-        if found:
-            lib_manager_node = found[0]
-    except Exception:
-        pass
-    if lib_manager_node is None:
-        for child in primary_project.get_children(True):
-            cname = getattr(child, 'get_name', lambda: '')()
-            if cname and 'library manager' in cname.lower():
-                lib_manager_node = child
-                break
-    if lib_manager_node is None:
+    entries = library_reference_entries(primary_project)
+    if not entries and not library_managers(primary_project):
         print("SCRIPT_ERROR_CODE: ERR_OBJECT_NOT_FOUND")
         raise RuntimeError("Library Manager node not found in target project.")
-
-    # Build a lookup of library references in the target project by name.
-    refs_by_name = {}
-    for ref in lib_manager_node.get_children(False):
-        rn = getattr(ref, 'get_name', lambda: '')()
-        if rn:
-            refs_by_name[str(rn).strip().lower()] = ref
 
     applied = []
     skipped = []
@@ -63,24 +49,12 @@ try:
         lib_name = lib_entry.get(u'libraryName')
         if not lib_name:
             continue
-        ref = refs_by_name.get(str(lib_name).strip().lower())
-        if ref is None:
-            skipped.append({'library': lib_name, 'reason': 'not_in_target_library_manager'})
+        entry, err = resolve_library_reference(entries, lib_name)
+        if entry is None:
+            skipped.append({'library': lib_name, 'reason': 'not_in_target_library_manager', 'detail': err})
             continue
-
-        # Resolve parameter accessor.
-        params_collection = None
-        for attr in ('parameters', 'parameter', 'get_parameters', 'get_all_parameters'):
-            if hasattr(ref, attr):
-                try:
-                    v = getattr(ref, attr)
-                    cand = v() if callable(v) else v
-                    if cand is not None:
-                        params_collection = cand
-                        break
-                except Exception:
-                    pass
-        if params_collection is None:
+        ref = entry['_ref']
+        if ref is None or library_parameter_names(ref) is None:
             skipped.append({'library': lib_name, 'reason': 'no_parameter_accessor'})
             continue
 
@@ -88,90 +62,27 @@ try:
             p_name = p.get(u'name')
             p_value = p.get(u'value')
             p_overridden = p.get(u'isOverridden')
-            if not p_name or p_value is None:
+            if not p_name or p_value is None or not _to_unicode(p_value).strip():
                 skipped.append({'library': lib_name, 'parameter': p_name, 'reason': 'missing_name_or_value'})
                 continue
             if skip_defaults and not p_overridden:
                 skipped.append({'library': lib_name, 'parameter': p_name, 'reason': 'not_overridden_in_export'})
                 continue
-
-            # Find the slot.
-            target_slot = None
-            target_key = None
+            val = to_codesys_text(p_value).strip()
             try:
-                if hasattr(params_collection, '__getitem__'):
-                    try:
-                        target_slot = params_collection[p_name]
-                        target_key = p_name
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            if target_slot is None:
-                # iterate
-                keys = []
-                try:
-                    keys = list(params_collection.keys())
-                except Exception:
-                    try:
-                        keys = list(iter(params_collection))
-                    except Exception:
-                        keys = []
-                for k in keys:
-                    slot = k
-                    if hasattr(params_collection, '__getitem__'):
-                        try:
-                            slot = params_collection[k]
-                        except Exception:
-                            pass
-                    slot_name = None
-                    for nattr in ('name', 'get_name'):
-                        if hasattr(slot, nattr):
-                            try:
-                                v = getattr(slot, nattr)
-                                slot_name = v() if callable(v) else v
-                            except Exception:
-                                pass
-                            break
-                    if slot_name is None and isinstance(k, (str, unicode)):
-                        slot_name = k
-                    if slot_name and str(slot_name).strip() == str(p_name).strip():
-                        target_slot = slot
-                        target_key = k
-                        break
-            if target_slot is None:
-                failures.append({'library': lib_name, 'parameter': p_name, 'error': 'slot_not_found'})
+                ref.parameters[p_name] = val
+                rb = library_parameter_value(entry['_lm'].references[entry['display']], p_name)
+            except Exception as we:
+                failures.append({'library': lib_name, 'parameter': p_name, 'error': str(we)})
                 continue
+            if rb is None or rb.strip() != val:
+                failures.append({'library': lib_name, 'parameter': p_name,
+                                 'error': 'write did not stick: wrote %r, read back %r' % (val, rb)})
+                continue
+            applied.append({'library': entry['display'], 'parameter': p_name, 'value': val})
 
-            written = False
-            last_err = None
-            if hasattr(target_slot, 'value'):
-                try:
-                    target_slot.value = p_value
-                    written = True
-                except Exception as e:
-                    last_err = "value=: %s" % e
-            if not written and hasattr(target_slot, 'set_value'):
-                try:
-                    target_slot.set_value(p_value)
-                    written = True
-                except Exception as e:
-                    last_err = (last_err or '') + " | set_value(): %s" % e
-            if not written and hasattr(params_collection, '__setitem__'):
-                try:
-                    params_collection[target_key] = p_value
-                    written = True
-                except Exception as e:
-                    last_err = (last_err or '') + " | collection[k]=: %s" % e
-            if written:
-                applied.append({'library': lib_name, 'parameter': p_name, 'value': p_value})
-            else:
-                failures.append({'library': lib_name, 'parameter': p_name, 'error': last_err})
-
-    try:
-        primary_project.save()
-    except Exception as se:
-        print("WARN: project.save() raised: %s" % se)
+    if applied:
+        save_project_checked(primary_project, "the imported library parameters")
 
     emit_result({
         u'applied': applied,
@@ -179,6 +90,10 @@ try:
         u'failures': failures,
     })
     print("Applied: %d. Skipped: %d. Failures: %d." % (len(applied), len(skipped), len(failures)))
+    if failures:
+        print("SCRIPT_ERROR_CODE: ERR_WRITE_DID_NOT_STICK")
+        raise RuntimeError("%d parameter(s) failed to import (applied ones were saved): %s" % (
+            len(failures), failures))
     print("SCRIPT_SUCCESS: Library parameters imported.")
     sys.exit(0)
 except Exception as e:
