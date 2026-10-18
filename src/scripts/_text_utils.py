@@ -725,3 +725,98 @@ def find_name_ci(names, wanted):
         if _to_unicode(n).lower() == w:
             return n
     return None
+
+
+# ------------------------------------------------------- library repository
+#
+# Live AB 2.9 SP19 (probe_api, 2026-10-18), the shapes every repository tool
+# relies on:
+#   se.librarymanager.get_all_libraries() -> ManagedLib objects, NOT tuples.
+#     The name is in .title. There is no .name and no .get_name -- probing
+#     those is why list_library_repository reported every entry nameless and
+#     uninstall_library_from_repository found nothing it had just installed.
+#     Also .version, .company and .displayname ('Title, 1.0.0 (Company)').
+#     The entry does not know its repository.
+#   find_library('Title, 1.0.0 (Company)') -> (ManagedLib, LibRepository), or
+#     None when not installed (no exception). 'Title, * (Company)' returns the
+#     newest installed version; a bare 'Title' raises SystemError.
+#   uninstall_library(repository, library) -- repository FIRST.
+#   get_file_path(library) -> path of the installed .library file.
+#   LibRepository: .name, .root_folder, .editable.
+
+def repository_library_manager():
+    """The global library manager (se.librarymanager), or None."""
+    import scriptengine as _se
+    for attr in ('librarymanager', 'library_manager'):
+        try:
+            cand = getattr(_se, attr, None)
+        except Exception:
+            cand = None
+        if cand is not None:
+            return cand
+    return None
+
+
+def repository_libraries(lib_mgr):
+    """Every installed library as {title, version, company, display, _lib}.
+
+    title/version/company come from the ManagedLib attributes, falling back
+    to parsing .displayname (or str()) when an attribute is missing, so a
+    build that renames one of them degrades instead of going nameless."""
+    out = []
+    try:
+        items = list(lib_mgr.get_all_libraries())
+    except Exception as e:
+        print("DEBUG: get_all_libraries() failed: %s" % e)
+        return out
+    for item in items:
+        lib = item[0] if isinstance(item, (tuple, list)) and item else item
+        display = _ref_attr(lib, 'displayname')
+        display = _to_unicode(display) if display else _to_unicode(lib)
+        p_title, p_ver, p_comp = split_library_display(display)
+        title = _ref_attr(lib, 'title')
+        version = _ref_attr(lib, 'version')
+        company = _ref_attr(lib, 'company')
+        out.append({
+            'title': _to_unicode(title) if title else p_title,
+            'version': _to_unicode(version) if version is not None else p_ver,
+            'company': _to_unicode(company) if company else p_comp,
+            'display': display,
+            '_lib': lib,
+        })
+    return out
+
+
+def find_installed_library(lib_mgr, display):
+    """(ManagedLib, LibRepository) for 'Title, version (Company)' -- or
+    'Title, * (Company)' for the newest -- or None when not installed."""
+    try:
+        hit = lib_mgr.find_library(display)
+    except Exception as e:
+        print("DEBUG: find_library(%r) raised: %s" % (display, e))
+        return None
+    if not hit:
+        return None
+    try:
+        lib, repo = hit[0], hit[1]
+    except Exception:
+        return None
+    if lib is None:
+        return None
+    return lib, repo
+
+
+def installed_versions_of(lib_mgr, title, company=None):
+    """Sorted display strings of every installed version of a library title
+    (case-insensitive), optionally restricted to one company. Used to turn a
+    'not found' into an actionable list instead of a dead end."""
+    t = _to_unicode(title).strip().lower()
+    c = _to_unicode(company).strip().lower() if company else None
+    hits = []
+    for e in repository_libraries(lib_mgr):
+        if (e['title'] or u'').lower() != t:
+            continue
+        if c is not None and (e['company'] or u'').lower() != c:
+            continue
+        hits.append(e['display'])
+    return sorted(hits)

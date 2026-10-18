@@ -118,6 +118,7 @@ The `add_device.py`, `set_device_parameter.py`, `list_device_repository.py`, `cr
 12. **`npm run build` changes the scripts under every running server, not the handlers.** The global `codesys-mcp-persistent` is `npm link`ed to this repo, so other Claude Code sessions pick up new `.py` templates on their next call while keeping their old TS handlers until restarted. A new placeholder must go through `opt_placeholder()` and fall back to the old behaviour; code shared by several scripts goes into `_text_utils.py` (every handler prepends it) -- a NEW helper file is only prepended by new handlers, so the script would NameError in the old ones.
 13. **Library Manager on AB 2.9**: references are not child objects -- use `lm.references` (see `_text_utils.library_reference_entries`), across ALL Library Managers (an application project has two). `#` means placeholder, not system (`system_library` says that). `ref.parameters` lists only the project's overrides and accepts any name on write.
 14. **Real API shapes are in the stubs**: `C:\Program Files\ABB\AB2.9\AutomationBuilder\ScriptLib\Stubs\scriptengine\*.pyi` -- read them before adding a probe cascade. Internal assemblies cannot be imported from a script (`Access to module ... not permitted`).
+15. **Library repository on AB 2.9** (`se.librarymanager`): `get_all_libraries()` yields `ManagedLib` objects whose name is **`.title`** -- there is no `.name` / `.get_name`, which is why two tools saw every entry as nameless. `find_library('Title, version (Company)')` returns `(lib, repository)` or `None` (`'*'` = newest; a bare title raises), and `uninstall_library(repository, library)` takes the repository **first**. Helpers: `repository_libraries` / `find_installed_library` in `_text_utils`. In a project, a placeholder's version is `set_redirection(...)` (it accepts a version that is not installed and leaves the reference unresolved -- check first), a managed reference's `managed_library` is read-only (remove + add).
 
 ## Development workflow
 
@@ -128,7 +129,7 @@ pwsh dev/check-scripts.ps1
 # Build (cleans dist/, runs tsc, copies scripts/)
 npm run build
 
-# All tests (90 currently; the fake-engine suite needs a CPython 2.7, AB ships one)
+# All tests (104 currently; the fake-engine suite needs a CPython 2.7, AB ships one)
 npm test
 
 # Type check only

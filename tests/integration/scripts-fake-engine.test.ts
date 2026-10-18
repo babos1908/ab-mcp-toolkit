@@ -293,6 +293,191 @@ def dump():
     });
   });
 
+  // ------------------------------------------- library repository (2026-10-18)
+  // Repository entries carry their name in .title (no .name / .get_name) and
+  // uninstall_library takes (repository, library): the two reasons the old
+  // uninstall could not remove a library it had just installed.
+  describe('uninstall_library_from_repository / list_library_repository', () => {
+    const REPO_STATE = `
+def dump():
+    return {'installed': sorted(se.librarymanager.by_display.keys()),
+            'uninstalled': [c[1] for c in se.CALLS if c[0] == 'uninstall_library']}
+`;
+    // The real handlers prepend only _text_utils for these two tools.
+    const runRepo = (script: string, params: Record<string, string>, extra = '') =>
+      run(script, params, WORLD() + extra + REPO_STATE, ['_text_utils']);
+
+    it('uninstalls a library that install_library_to_repository has just installed (the 2026-10-17 regression)', () => {
+      const r = runRepo('uninstall_library_from_repository',
+        { LIBRARY_NAME: 'McpProbeLib', LIBRARY_VERSION: '*', REPOSITORY_NAME: '' }, `
+lm = se.librarymanager
+lm.file_meta['C:/x/McpProbeLib.library'] = 'McpProbeLib, 0.0.2 (McpProbe)'
+lm.install_library('C:/x/McpProbeLib.library', lm.repositories[0], True)
+lm.by_display['McpProbeLib2, 1.0.0 (McpProbe)'] = se.ManagedLib('McpProbeLib2, 1.0.0 (McpProbe)')
+`);
+      expect(ok(r)).toBe(true);
+      expect(r.state.uninstalled).toEqual(['McpProbeLib, 0.0.2 (McpProbe)']);
+      expect(r.state.installed).not.toContain('McpProbeLib, 0.0.2 (McpProbe)');
+      // exact title, never a substring: the sibling stays
+      expect(r.state.installed).toContain('McpProbeLib2, 1.0.0 (McpProbe)');
+      expect(r.result.uninstalled[0].via).toBe('uninstall_library(repository, library)');
+    });
+
+    it('removes only the requested version', () => {
+      const r = runRepo('uninstall_library_from_repository',
+        { LIBRARY_NAME: 'ac500-v3-utilities-ip', LIBRARY_VERSION: '1.0.1', REPOSITORY_NAME: '' });
+      expect(ok(r)).toBe(true);
+      expect(r.state.uninstalled).toEqual(['AC500-V3-utilities-ip, 1.0.1 (ABB)']);
+      expect(r.state.installed).toContain('AC500-V3-utilities-ip, 1.0.2 (ABB)');
+    });
+
+    it('accepts the full display string as the name', () => {
+      const r = runRepo('uninstall_library_from_repository',
+        { LIBRARY_NAME: 'MProtocol-library, 0.1.4 (ABB)', LIBRARY_VERSION: '*', REPOSITORY_NAME: '' });
+      expect(ok(r)).toBe(true);
+      expect(r.state.uninstalled).toEqual(['MProtocol-library, 0.1.4 (ABB)']);
+      expect(r.state.installed).toContain('MProtocol-library, 1.0.0 (ABB)');
+    });
+
+    it('a version that is not installed is ERR_LIB_NOT_FOUND listing what is, and removes nothing', () => {
+      const r = runRepo('uninstall_library_from_repository',
+        { LIBRARY_NAME: 'AC500-V3-utilities-ip', LIBRARY_VERSION: '9.9.9', REPOSITORY_NAME: '' });
+      expect(ok(r)).toBe(false);
+      expect(r.code).toBe('ERR_LIB_NOT_FOUND');
+      // In the error message itself -- the STATE dump also lists them, which
+      // let a looser toContain() pass against the old script.
+      expect(r.output).toMatch(
+        /installed versions of 'AC500-V3-utilities-ip': AC500-V3-utilities-ip, 1\.0\.1 \(ABB\), AC500-V3-utilities-ip, 1\.0\.2 \(ABB\)/);
+      expect(r.state.uninstalled).toEqual([]);
+    });
+
+    it('a library still installed after the call fails loudly instead of reporting success', () => {
+      const r = runRepo('uninstall_library_from_repository',
+        { LIBRARY_NAME: 'AC500-V3-LogiQ', LIBRARY_VERSION: '0.0.2', REPOSITORY_NAME: '' },
+        `se.librarymanager.uninstall_library = lambda repo, lib: None\n`);
+      expect(ok(r)).toBe(false);
+      expect(r.code).toBe('ERR_WRITE_DID_NOT_STICK');
+      expect(r.state.installed).toContain('AC500-V3-LogiQ, 0.0.2 (ABB)');
+    });
+
+    it('list_library_repository reports titles, versions and display strings instead of 0 nameless entries', () => {
+      const r = runRepo('list_library_repository', { NAME_FILTER: 'utilities-ip' });
+      expect(ok(r)).toBe(true);
+      expect(r.result.skippedNoName).toBe(0);
+      expect(r.result.totalLibraries).toBe(2);
+      const libs = r.result.repositories[0].libraries;
+      expect(libs.map((l: any) => l.display)).toEqual(
+        ['AC500-V3-utilities-ip, 1.0.1 (ABB)', 'AC500-V3-utilities-ip, 1.0.2 (ABB)']);
+      expect(libs[0].name).toBe('AC500-V3-utilities-ip');
+      expect(libs[0].company).toBe('ABB');
+      expect(r.result.repositories[0].location).toContain('AB_Managed Libraries_2.9');
+    });
+
+    it('list_library_repository without a filter lists every installed library', () => {
+      const r = runRepo('list_library_repository', { NAME_FILTER: '' });
+      expect(ok(r)).toBe(true);
+      expect(r.result.totalLibraries).toBe(r.result.totalScanned);
+      expect(r.result.totalLibraries).toBeGreaterThanOrEqual(7);
+    });
+  });
+
+  // -------------------------------- set_library_reference_version (2026-10-18)
+  // Placeholder: version = project-level redirection (set_redirection).
+  // Managed: managed_library is read-only, so remove + add, restoring the
+  // project's settings and overrides. AB accepts a redirection to a version
+  // that is not installed and leaves the reference unresolved -- the script
+  // must refuse that before writing.
+  describe('set_library_reference_version', () => {
+    const REF_STATE = `
+def dump():
+    out = {}
+    for r in w['app_lm']._refs:
+        d = {'qualified_only': r.qualified_only, 'namespace': r.namespace}
+        if r.is_placeholder:
+            d['redirect'] = r._redirect
+            d['effective'] = r.effective_resolution
+        else:
+            d['overrides'] = dict((k, r.parameters[k]) for k in r.parameters)
+        out[r.name] = d
+    return {'refs': out, 'saves': w['project'].saves,
+            'redirects': [c for c in se.CALLS if c[0] == 'set_redirection']}
+`;
+    const runVer = (lib: string, ver: string, extra = '') =>
+      runFixed('set_library_reference_version', { LIBRARY_NAME: lib, NEW_VERSION: ver }, WORLD() + extra + REF_STATE);
+
+    it('placeholder: redirects #MProtocol to an installed version and saves', () => {
+      const r = runVer('MProtocol', '0.1.4');
+      expect(ok(r)).toBe(true);
+      expect(r.result.kind).toBe('placeholder');
+      expect(r.result.setVia).toBe('set_redirection');
+      expect(r.result.effectiveResolution).toBe('MProtocol-library, 0.1.4 (ABB)');
+      expect(r.state.refs['#MProtocol'].redirect).toBe('MProtocol-library, 0.1.4 (ABB)');
+      expect(r.state.saves).toBe(1);
+    });
+
+    it("placeholder: '*' floats to the newest installed version", () => {
+      const r = runVer('#MProtocol', '*');
+      expect(ok(r)).toBe(true);
+      expect(r.state.refs['#MProtocol'].redirect).toBe('MProtocol-library, * (ABB)');
+      expect(r.result.effectiveResolution).toBe('MProtocol-library, 1.0.0 (ABB)');
+    });
+
+    it('placeholder: a version that is not installed is refused BEFORE writing (AB would accept it silently)', () => {
+      const r = runVer('MProtocol', '9.9.9');
+      expect(ok(r)).toBe(false);
+      expect(r.code).toBe('ERR_LIB_NOT_FOUND');
+      expect(r.output).toMatch(/was NOT redirected .*Installed: MProtocol-library, 0\.1\.4 \(ABB\), MProtocol-library, 1\.0\.0 \(ABB\)/);
+      expect(r.state.redirects).toEqual([]);
+      expect(r.state.refs['#MProtocol'].effective).toBe('MProtocol-library, 1.0.0 (ABB)');
+      expect(r.state.saves).toBe(0);
+    });
+
+    it('managed: remove + add, restoring qualified_only/namespace and re-applying overrides', () => {
+      const r = runVer('AC500-V3-utilities-ip', '1.0.1',
+        `ref(w['app_lm'], 'AC500-V3-utilities-ip, 1.0.2 (ABB)').parameters['GC_X'] = '5'\n`);
+      expect(ok(r)).toBe(true);
+      expect(r.result.kind).toBe('managed');
+      expect(r.result.resolvesTo).toBe('AC500-V3-utilities-ip, 1.0.1 (ABB)');
+      expect(r.state.refs['AC500-V3-utilities-ip, 1.0.2 (ABB)']).toBeUndefined();
+      const now = r.state.refs['AC500-V3-utilities-ip, 1.0.1 (ABB)'];
+      expect(now.qualified_only).toBe(true);   // the fake's add_library resets it to false
+      expect(now.namespace).toBe('UtilsIP');
+      expect(now.overrides).toEqual({ GC_X: '5' });
+      expect(r.state.saves).toBe(1);
+    });
+
+    it("managed: '*' makes a floating reference that resolves to the newest", () => {
+      const r = runVer('AC500-V3-utilities-ip', '*');
+      expect(ok(r)).toBe(true);
+      expect(r.state.refs['AC500-V3-utilities-ip, * (ABB)']).toBeDefined();
+      expect(r.result.resolvesTo).toBe('AC500-V3-utilities-ip, 1.0.2 (ABB)');
+    });
+
+    it('managed: a change that does not verify is rolled back in memory and not saved', () => {
+      const r = runVer('AC500-V3-utilities-ip', '1.0.1', `
+_orig_add = se.LibMan.add_library
+def _wrong_add(self, display):
+    r = _orig_add(self, display)
+    r._managed_lib = se.ManagedLib('AC500-V3-utilities-ip, 1.0.2 (ABB)')  # resolves to the wrong version
+    return r
+se.LibMan.add_library = _wrong_add
+`);
+      expect(ok(r)).toBe(false);
+      expect(r.code).toBe('ERR_WRITE_DID_NOT_STICK');
+      expect(r.output).toContain('restored');
+      expect(r.state.refs['AC500-V3-utilities-ip, 1.0.1 (ABB)']).toBeUndefined();
+      expect(r.state.refs['AC500-V3-utilities-ip, 1.0.2 (ABB)'].qualified_only).toBe(true);
+      expect(r.state.saves).toBe(0);
+    });
+
+    it('a system reference is refused', () => {
+      const r = runVer('Standard', '3.5.19.0');
+      expect(ok(r)).toBe(false);
+      expect(r.code).toBe('ERR_BAD_INPUT');
+      expect(r.state.saves).toBe(0);
+    });
+  });
+
   // ------------------------------------------------------------- #7 set_project_info
   describe('set_project_info released', () => {
     const P = (extra: Record<string, string>) => ({ VERSION: '', TITLE: '', AUTHOR: '', COMPANY: '', DESCRIPTION: '', ...extra });

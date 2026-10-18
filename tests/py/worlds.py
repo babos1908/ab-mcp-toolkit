@@ -32,7 +32,8 @@ def ac500_project(released=False, web_overrides=None, util_overrides=None):
     folder holding an ImagePool."""
     app_lm = se.LibMan('Library Manager', [
         se.Ref('#LogiQ', placeholder=True, resolution='AC500-V3-LogiQ, 0.0.2 (ABB)'),
-        se.Ref('#MProtocol', placeholder=True, resolution='MProtocol-library, 1.0.0 (ABB)'),
+        se.Ref('#MProtocol', placeholder=True, resolution='MProtocol-library, 1.0.0 (ABB)',
+               redirection='MProtocol-library, 1.0.0 (ABB)'),
         se.Ref('#Util', placeholder=True, resolution='Util, 3.5.21.0 (System)',
                overrides=util_overrides if util_overrides is not None else {'IBLOCKSIZE': '22800'}),
         se.Ref('#Standard', placeholder=True, system=True, resolution='Standard, 3.5.18.0 (System)'),
@@ -66,6 +67,16 @@ def ac500_project(released=False, web_overrides=None, util_overrides=None):
     web_src.primary = False
     se.projects.openable[WEB_LIB] = web_src
     se.librarymanager.by_display['Util, 3.5.21.0 (System)'] = se.ManagedLib('Util, 3.5.21.0 (System)', UTIL_LIB)
+    # The repository as probe_api saw it on the real machine (2026-10-18):
+    # two MProtocol and two utilities-ip versions installed side by side.
+    for display, ns in (('MProtocol-library, 0.1.4 (ABB)', 'MProtocol'),
+                        ('MProtocol-library, 1.0.0 (ABB)', 'MProtocol'),
+                        ('AC500-V3-utilities-ip, 1.0.1 (ABB)', 'UtilsIP'),
+                        ('AC500-V3-utilities-ip, 1.0.2 (ABB)', 'UtilsIP'),
+                        ('AC500-V3-LogiQ, 0.0.2 (ABB)', 'LogiQ')):
+        se.librarymanager.by_display[display] = se.ManagedLib(display, default_namespace=ns)
+    se.librarymanager.by_display['AC500-V3-utilities-web, 1.0.0 (ABB)'] = \
+        app_lm.references['AC500-V3-utilities-web, 1.0.0 (ABB)'].managed_library
     return {'project': proj, 'app_lm': app_lm, 'root_lm': root_lm, 'tc': tc, 'web_src': web_src}
 
 
