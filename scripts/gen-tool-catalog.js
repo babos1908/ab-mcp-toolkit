@@ -2,58 +2,60 @@
 /**
  * Generate docs/TOOL-CATALOG.md from the tool registrations in src/server.ts.
  *
- * Why: the human-written skill / docs drifted stale more than once (claimed
- * "Standard only", "SA not implemented", etc.). This extracts the ground truth
- * -- every s.tool('name', 'description', ...) -- straight from source, so the
- * catalog can never lie about what tools exist. Run as part of `npm run build`.
- *
- * Deliberately a dumb regex scan (no TS parse): tool registrations follow a
- * fixed shape `s.tool(\n 'name',\n "description...",`. If that shape changes,
- * this will under-report -- acceptable for a doc generator, and the count is
- * printed so a regression is visible.
+ * The catalog is the written list of the tool part of the public API
+ * (docs/PUBLIC-API.md): every tool with every parameter's name, type,
+ * required-ness and allowed values. It is generated so it cannot drift from
+ * the code -- hand-written docs claimed tools and limits that were no longer
+ * true more than once. Runs in `npm run build` and as `npm run docs`; the
+ * output depends only on src/server.ts, so running it twice changes nothing.
  */
 const fs = require('fs');
 const path = require('path');
+const { extractTools } = require('./lib/tool-api');
 
-const serverPath = path.join(__dirname, '..', 'src', 'server.ts');
-const outPath = path.join(__dirname, '..', 'docs', 'TOOL-CATALOG.md');
+const root = path.join(__dirname, '..');
+const outPath = path.join(root, 'docs', 'TOOL-CATALOG.md');
+const tools = extractTools(fs.readFileSync(path.join(root, 'src', 'server.ts'), 'utf-8'));
+const nParams = tools.reduce((n, t) => n + t.params.length, 0);
 
-const src = fs.readFileSync(serverPath, 'utf-8');
-
-// Match:  s.tool(  'name',  '<desc>' | "<desc>" | `<desc>`
-// The name is a single-quoted identifier; the description is the next string
-// literal (any of the three quote styles), possibly spanning lines.
-const re = /\b[s]\.tool\(\s*['"]([a-z0-9_]+)['"]\s*,\s*(['"`])([\s\S]*?)\2/gi;
-
-const tools = [];
-let m;
-while ((m = re.exec(src)) !== null) {
-  const name = m[1];
-  // Collapse whitespace/newlines in the description to one line.
-  const desc = m[3].replace(/\s+/g, ' ').trim();
-  tools.push({ name, desc });
-}
-
-tools.sort((a, b) => a.name.localeCompare(b.name));
+const cell = (s) => String(s ?? '').replace(/\|/g, '\\|').replace(/\s+/g, ' ').trim();
+const typeOf = (p) => (p.values ? p.values.map((v) => `'${v}'`).join(' \\| ') : cell(p.type));
 
 const lines = [];
 lines.push('# Tool catalog (auto-generated)');
 lines.push('');
-lines.push('> Generated from `src/server.ts` by `scripts/gen-tool-catalog.js` (runs during `npm run build`).');
-lines.push('> Do NOT edit by hand -- your changes will be overwritten. Fix the tool description in `server.ts` instead.');
+lines.push('> Generated from `src/server.ts` by `scripts/gen-tool-catalog.js` (`npm run docs`, also run by `npm run build`).');
+lines.push('> Do not edit by hand: fix the tool registration in `server.ts` and regenerate.');
 lines.push('');
-lines.push(`**${tools.length} tools.**`);
+lines.push(`**${tools.length} tools, ${nParams} parameters.** Tool names, parameter names, types, required-ness and allowed values are part of the public API -- see [PUBLIC-API.md](PUBLIC-API.md) for what that guarantees. Optional parameters are marked \`?\`.`);
 lines.push('');
-lines.push('| Tool | Description |');
+lines.push('| Tool | Parameters |');
 lines.push('|---|---|');
 for (const t of tools) {
-  // Escape pipes in the description so the table doesn't break.
-  const d = t.desc.replace(/\|/g, '\\|');
-  lines.push(`| \`${t.name}\` | ${d} |`);
+  const sig = t.params.length
+    ? t.params.map((p) => `\`${p.name}${p.required ? '' : '?'}\``).join(', ')
+    : '--';
+  lines.push(`| [\`${t.name}\`](#${t.name}) | ${sig} |`);
 }
 lines.push('');
+for (const t of tools) {
+  lines.push(`## ${t.name}`);
+  lines.push('');
+  lines.push(cell(t.description) || '_No description._');
+  lines.push('');
+  if (!t.params.length) {
+    lines.push('No parameters.');
+    lines.push('');
+    continue;
+  }
+  lines.push('| Parameter | Type | Required | Constraints | Description |');
+  lines.push('|---|---|---|---|---|');
+  for (const p of t.params) {
+    lines.push(`| \`${p.name}\` | ${typeOf(p)} | ${p.required ? 'yes' : 'no'} | ${cell(p.constraints.join(', '))} | ${cell(p.description)} |`);
+  }
+  lines.push('');
+}
 
 fs.mkdirSync(path.dirname(outPath), { recursive: true });
 fs.writeFileSync(outPath, lines.join('\n'), 'utf-8');
-
-process.stderr.write(`gen-tool-catalog: wrote ${tools.length} tools to ${path.relative(process.cwd(), outPath)}\n`);
+process.stderr.write(`gen-tool-catalog: wrote ${tools.length} tools, ${nParams} parameters to ${path.relative(process.cwd(), outPath)}\n`);

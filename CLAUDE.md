@@ -83,10 +83,9 @@ These exist for real reasons. Don't simplify them away without reading their CHA
    - For non-project-state (global like `list_device_repository`): just `['_text_utils']`.
    - Use `formatToolResponse(result, successMessage)` for plain-text response, or `parseResultJson<T>(result.output)` for structured returns.
 3. Run `pwsh dev/check-scripts.ps1` (ASCII + template-reference check).
-4. `npm run build && npm test`.
-5. After Python script changes: no MCP restart needed (cache removed in 0.6.1; templates read from disk every call).
-6. After TS changes: `/mcp` reconnect required.
-7. Update `README.md` tool table and `CHANGELOG.md`.
+4. `npm test` -- test from source. Do NOT build to try something: a build is a release (see "Releases" below).
+5. A new tool or optional parameter is a MINOR change, so bump the version before the release build.
+6. Update `CHANGELOG.md` and run `npm run docs` (regenerates `docs/TOOL-CATALOG.md`).
 
 ### Choosing the right helpers
 
@@ -115,7 +114,7 @@ The `add_device.py`, `set_device_parameter.py`, `list_device_repository.py`, `cr
 9. **DUT names with `.`** are rejected by CODESYS. Don't use dots in identifier names (they're parsed as namespace separators).
 10. **`set_pou_code` content not formatted for diff inspection.** Every successful call hits disk and the project file's XML changes. There's no staging. Always read before overwriting; keep prior content in conversation context.
 11. **`is_simulation_mode` getter returns `None`** on the ifm AE3100 device descriptor (and probably others). The setter works; verification has to come from compile + Online -> Login working.
-12. **`npm run build` changes the scripts under every running server, not the handlers.** The global `codesys-mcp-persistent` is `npm link`ed to this repo, so other Claude Code sessions pick up new `.py` templates on their next call while keeping their old TS handlers until restarted. A new placeholder must go through `opt_placeholder()` and fall back to the old behaviour; code shared by several scripts goes into `_text_utils.py` (every handler prepends it) -- a NEW helper file is only prepended by new handlers, so the script would NameError in the old ones.
+12. **`npm run build` is a release: it changes the scripts under every running server, not the handlers.** The global `codesys-mcp-persistent` is `npm link`ed to this repo, so other Claude Code sessions pick up new `.py` templates on their next call while keeping their old TS handlers until restarted (`get_mcp_version` shows `restartNeeded`). That is why the release guard refuses a build without a new version -- 77 builds went out as `0.6.2` before it existed. A new placeholder must go through `opt_placeholder()` and fall back to the old behaviour; code shared by several scripts goes into `_text_utils.py` (every handler prepends it) -- a NEW helper file is only prepended by new handlers, so the script would NameError in the old ones.
 13. **Library Manager on AB 2.9**: references are not child objects -- use `lm.references` (see `_text_utils.library_reference_entries`), across ALL Library Managers (an application project has two). `#` means placeholder, not system (`system_library` says that). `ref.parameters` lists only the project's overrides and accepts any name on write.
 14. **Real API shapes are in the stubs**: `C:\Program Files\ABB\AB2.9\AutomationBuilder\ScriptLib\Stubs\scriptengine\*.pyi` -- read them before adding a probe cascade. Internal assemblies cannot be imported from a script (`Access to module ... not permitted`).
 15. **Library repository on AB 2.9** (`se.librarymanager`): `get_all_libraries()` yields `ManagedLib` objects whose name is **`.title`** -- there is no `.name` / `.get_name`, which is why two tools saw every entry as nameless. `find_library('Title, version (Company)')` returns `(lib, repository)` or `None` (`'*'` = newest; a bare title raises), and `uninstall_library(repository, library)` takes the repository **first**. Helpers: `repository_libraries` / `find_installed_library` in `_text_utils`. In a project, a placeholder's version is `set_redirection(...)` (it accepts a version that is not installed and leaves the reference unresolved -- check first), a managed reference's `managed_library` is read-only (remove + add).
@@ -127,19 +126,31 @@ The `add_device.py`, `set_device_parameter.py`, `list_device_repository.py`, `cr
 # Static checks (ASCII, template-reference resolution, orphan scripts)
 pwsh dev/check-scripts.ps1
 
-# Build (cleans dist/, runs tsc, copies scripts/)
-npm run build
-
-# All tests (119 currently; the fake-engine suite needs a CPython 2.7, AB ships one)
+# All tests, from source -- 139 currently (the fake-engine suite needs a CPython 2.7, AB ships one)
 npm test
 
 # Type check only
 npm run typecheck
+
+# Regenerate docs/TOOL-CATALOG.md (the tool part of the public API)
+npm run docs
+
+# Release: release guard, clean dist/, tsc, copy scripts, catalog, build-info
+npm run build
 ```
 
-After Python script edits: just rebuild; the in-process script-manager reads templates from disk every call (no cache; removed 0.6.1).
+### Releases (Semantic Versioning 2.0.0 -- docs/PUBLIC-API.md)
 
-After TS edits: `/mcp` reconnect required (the host has the compiled JS in memory).
+A build is a release: `npm link` serves `dist/` to every session on the machine. So:
+
+1. Pick the bump from the table in `docs/PUBLIC-API.md` -- PATCH for a fix, MINOR for a new tool/optional parameter/result field/error code, MAJOR for anything incompatible -- and set it with `npm version <level|X.Y.Z-rc.N> --no-git-tag-version`.
+2. Update `CHANGELOG.md`, run `npm run docs`, and commit.
+3. Run `npm run build`. `scripts/release-guard.js` refuses an invalid version, uncommitted `src/` or `package.json`, a version lower than the last tag, a number already tagged or built here with different content, and a tool API change bigger than the bump; it prints what changed and the minimum version.
+4. Run `git tag -a vX.Y.Z -m "..."`, then `git push origin main vX.Y.Z`.
+
+Never reuse a number, not even for a one-byte fix. A build other sessions should try first is a pre-release (`1.1.0-rc.1`).
+
+After a release, other sessions get the new Python scripts at once; their TS handlers change only when Claude Code restarts.
 
 Smoke-test recipe for live verification: `dev/SMOKE_TEST.md`.
 

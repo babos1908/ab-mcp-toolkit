@@ -186,7 +186,7 @@ def build_story():
     # --- 1
     s.append(para("1. Cosa ottieni", S_H1))
     s.append(para(
-        "Un server MCP che espone 75 tool con cui Claude Code pilota Automation Builder: aprire "
+        "Un server MCP che espone oltre 70 tool con cui Claude Code pilota Automation Builder: aprire "
         "progetti, leggere e scrivere POU, compilare con errori strutturati, cercare nel codice IEC, "
         "gestire library e repository, manipolare il device tree AC500, configurare i task."))
     s.append(para(
@@ -348,7 +348,7 @@ def build_story():
             ["Setup completo, troubleshooting esteso, sync con upstream", "ONBOARDING.md nel repo"],
             ["Workflow, caveat della piattaforma, pattern hardware AC500",
              "skills/codesys-ab/SKILL.md nel repo (e' la skill stessa: si legge come documento)"],
-            ["Elenco completo dei 75 tool con descrizione", "docs/TOOL-CATALOG.md (auto-generato)"],
+            ["Elenco completo dei tool, con tutti i parametri", "docs/TOOL-CATALOG.md (auto-generato)"],
             ["Quali fix sono attivi nella tua installazione",
              "chiedi a Claude di chiamare get_mcp_version"],
             ["Documentazione delle librerie ABB, gia' sul tuo disco",

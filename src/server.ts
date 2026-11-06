@@ -18,6 +18,7 @@ import { diffLibraryFiles } from './library-diff';
 import { parseProjectOffline, searchProjectOffline } from './offline-reader';
 import { parseResultJson } from './result-parser';
 import { readOnlyHint } from './response-hints';
+import { BuildInfo, readBuildInfo, restartNeeded } from './build-info';
 import {
   CompileMessage,
   CacheFileReport,
@@ -184,7 +185,7 @@ const MCP_PATCHES: Array<{ id: string; description: string }> = [
   { id: 'watcher-prompt-handling-guard', description: 'watcher sets se.system.prompt_handling=ProcessScriptPrompts per command exec (restored after) so a modal dialog cannot deadlock the primary thread. Fixes the #1 field blocker: close_project/open_project while an interactive ONLINE session is logged in to a PLC would pop a "Logout from device?" modal that the headless host could never answer -> heartbeat stale -> force_reset + 2min cold start. Proxy-verified 2026-06-01: SARIF-export modal went from >200s deadlock to <1s return. Also fixes orphan-command queue starvation: a .command.json whose scriptPath is missing is now removed instead of re-read every worker loop forever.' },
   { id: 'online-ops-error-message-corrected', description: 'ensure_online_connection ERR_ONLINE_STACK_EMPTY message no longer tells the user to "click Online->Login, the MCP will reuse your session" -- that reuse path does NOT exist on AB 2.9 SP19 (Standard or Premium); the message now states the confirmed limitation and points to AB UI / out-of-band protocols.' },
   { id: 'create-boot-application', description: 'create_boot_application tool (Premium-confirmed): ScriptApplication.create_boot_application(path) after generate_code() -> deployable .app + .crc artifact, offline (no PLC). Verified 2026-05-31 on AB 2.9 SP19 (215KB .app + .crc). NOTE: SA config store/load + Standard Metrics export remain UI-only — their commands open modal Save-As dialogs that deadlock the headless watcher.' },
-  { id: 'run-static-analysis', description: 'run_static_analysis tool (Premium): executes the "Run Static Analysis" ScriptCommand (guid AE97B6F4) and reads findings from message category "Additional code checks" (guid 220493A1). Reuses parseCompileMessages. Avoids SARIF export (modal dialog deadlocks the watcher). Confirmed scriptable 2026-05-30 on AB 2.9 SP19 Premium.' },
+  { id: 'run-static-analysis', description: 'NOT A REGISTERED TOOL (found 2026-11-06 while declaring the public API for 1.0.0: the registration never reached server.ts; this entry and the docs had claimed a tool). What exists is src/scripts/run_static_analysis.py (Premium): it executes the "Run Static Analysis" ScriptCommand (guid AE97B6F4) and reads findings from message category "Additional code checks" (guid 220493A1). Reuses parseCompileMessages. Avoids SARIF export (modal dialog deadlocks the watcher). Confirmed scriptable 2026-05-30 on AB 2.9 SP19 Premium.' },
   { id: 'attach-mode-pid-guard', description: 'attach_codesys no longer flips healthy attached sessions to error: skip the PID-liveness health check when attached (pid is null by design in attach mode; liveness governed by watcher heartbeat). Confirmed 2026-05-30 on Premium that online ops still raise Stack empty from the GUI scripting context — edition-independent SP19 limit.' },
   { id: 'ready-timeout-ms-configurable', description: 'CLI --ready-timeout-ms flag wired to LauncherConfig (cold-start ~120s on AB)' },
   { id: 'command-timeout-wired', description: 'CLI --timeout wired to IpcClient.commandTimeoutMs (previously ignored)' },
@@ -254,26 +255,19 @@ function getPackageVersion(): string {
 }
 
 /**
- * Resolve the current git commit SHA for the installed MCP code. Best-effort:
- * if the repo isn't a git checkout (e.g. installed via npm tarball), returns
- * 'unknown'. Run synchronously since this is a cold-path tool call.
+ * The build this server process loaded, read once at module load (startup).
+ * Until 1.0.0 the version came from package.json and the "build" sha from
+ * `git rev-parse HEAD` at the moment of the call -- i.e. whatever the repo
+ * pointed at then, not what the process was running. Without a
+ * build-info.json (running from src, or a build older than 1.0.0) the
+ * version falls back to package.json and the commit is unknown.
  */
-function getBuildSha(): string {
-  try {
-    const { execSync } = require('child_process');
-    // Run in the package root (dist's parent).
-    const repoRoot = path.join(__dirname, '..');
-    const sha = execSync('git rev-parse HEAD', {
-      cwd: repoRoot,
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 3_000,
-    });
-    return String(sha).trim();
-  } catch {
-    return 'unknown';
-  }
-}
+const LOADED_BUILD: BuildInfo = readBuildInfo(__dirname) ?? {
+  version: getPackageVersion(),
+  commit: null,
+  builtAt: null,
+  dirty: null,
+};
 
 export async function startMcpServer(config: ServerConfig): Promise<void> {
   // Set log level
@@ -343,7 +337,9 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
   const server = new McpServer(
     {
       name: 'CODESYS Persistent MCP Server',
-      version: '0.1.0',
+      // Was hardcoded '0.1.0' until 1.0.0: clients were told a version that
+      // matched nothing.
+      version: LOADED_BUILD.version,
     },
     {
       capabilities: {
@@ -548,11 +544,21 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   s.tool(
     'get_mcp_version',
-    "Returns the MCP server's package version, the git commit SHA of the running build, and the list of named patches applied in this fork. Use to verify which fixes are active before assuming a workaround is needed for a known-fixed bug.",
+    "Returns the version and commit of the build this server process loaded (stamped at build time), the build whose Python scripts are on disk now, whether Claude Code needs a restart to load it, and the list of named patches in this fork. Versions follow Semantic Versioning 2.0.0 (docs/PUBLIC-API.md). Use to verify which fixes are active before assuming a workaround is needed for a known-fixed bug.",
     async () => {
+      const onDisk = readBuildInfo(__dirname);
+      const restart = restartNeeded(LOADED_BUILD, onDisk);
       const payload = {
-        mcpVersion: getPackageVersion(),
-        buildSha: getBuildSha(),
+        mcpVersion: LOADED_BUILD.version,
+        buildSha: LOADED_BUILD.commit,
+        builtAt: LOADED_BUILD.builtAt,
+        scriptsOnDisk: onDisk ? { version: onDisk.version, commit: onDisk.commit, builtAt: onDisk.builtAt } : null,
+        restartNeeded: restart,
+        ...(restart ? {
+          restartNote: `Scripts on disk are from ${onDisk!.version} (${(onDisk!.commit || 'unknown').slice(0, 7)}) but this server loaded ` +
+            `${LOADED_BUILD.version} (${(LOADED_BUILD.commit || 'unknown').slice(0, 7)}). Python scripts are re-read on every call, ` +
+            `the server's TypeScript is not: restart Claude Code to get the matching tools and parameters.`,
+        } : {}),
         codesysPath: config.codesysPath,
         codesysProfile: config.profileName,
         mode: executionMode,

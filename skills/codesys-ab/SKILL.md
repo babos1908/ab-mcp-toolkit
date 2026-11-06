@@ -40,7 +40,7 @@ Stesso pattern per `uiPos - 1`, `_uiLen - 1`, ecc. (Caso reale 2026-05-14: parse
 
 ## Stato note importanti
 
-- **Edizione**: verificare la licenza attiva sulla macchina (Standard vs Premium). Differenze pratiche: `attach_codesys` richiede `Tools → Scripting → Execute Script File…` (Premium); `run_static_analysis` richiede l'add-on Code Analysis (Premium). Tutto il resto (project/POU/compile/library/device tree) funziona da Standard in su.
+- **Edizione**: verificare la licenza attiva sulla macchina (Standard vs Premium). Differenze pratiche: `attach_codesys` richiede `Tools → Scripting → Execute Script File…` (Premium); la Static Analysis richiede l'add-on Code Analysis (Premium). Tutto il resto (project/POU/compile/library/device tree) funziona da Standard in su.
 - **Modalità**: `launch_codesys` (l'MCP spawna AB visibile) per il lavoro normale. `attach_codesys` (Premium) quando l'utente vuole guidare lui la GUI — utile per coesistenza umano+Claude su una sola istanza, zero lock conflict.
 - **NON aprire AB manualmente prima del MCP** se lavori in `launch_codesys` mode: il watcher non riesce ad acquisire il lock se la GUI utente lo tiene.
 - **keep-alive + adoption**: con `--keep-alive` nella config, AB sopravvive ai recycle del server MCP e il `launch_codesys` successivo **adotta** l'istanza viva ("Adopted the already-running CODESYS instance") invece di fare cold start.
@@ -52,7 +52,7 @@ Stesso pattern per `uiPos - 1`, `_uiLen - 1`, ecc. (Caso reale 2026-05-14: parse
 Passando a Premium si abilitano **2 cose già costruite**:
 
 1. **`attach_codesys` diventa percorribile** → il menu `Tools → Scripting → Execute Script File…` esiste. Diventa la **modalità raccomandata su macchina condivisa**: l'utente apre e guida la sua AB, l'MCP si attacca; `force_reset_watcher` NON gli killa la GUI. Zero contesa. (Su Standard non è possibile.)
-2. **`run_static_analysis` produce finding veri** → ma SOLO se un **rule set SA è configurato** nel progetto (Project Settings → Static Analysis). Setup una-tantum in GUI sul template, poi ogni compile ha SA nel loop. Senza rule set torna solo il summary "0 findings".
+2. **La Static Analysis diventa scriptabile** → ma produce finding veri SOLO se un **rule set SA è configurato** nel progetto (Project Settings → Static Analysis); senza, torna solo il summary "0 findings". **Non è un tool MCP**: lo script `run_static_analysis.py` esiste ed è stato provato su Premium il 2026-05-30, ma la sua registrazione non è mai arrivata in `server.ts` (scoperto il 2026-11-06 dichiarando l'API pubblica). Registrarlo è una funzione nuova (MINOR) da riprovare su Premium.
 
 **Online ops**: Premium **non** cambiava nulla storicamente (stesso `Stack empty`) — ma dal 2026-06-29 c'è un fix portato non ancora verificato che potrebbe cambiare il quadro su entrambe le edition. Vedi la sezione "Online / runtime" più sotto: è lì che sta lo stato aggiornato, non qui.
 
@@ -75,7 +75,7 @@ Elenco completo e sempre aggiornato: `docs/TOOL-CATALOG.md` nel repo (auto-gener
 - `get_codesys_status()` → state (`stopped` | `launching` | `ready` | `stalled` | `error`), mode, pid, **heartbeat age**. State `stalled` = watcher muto da >30s (worker morto o primary thread deadlockato) → `force_reset_watcher`.
 - `force_reset_watcher()` → recovery quando l'MCP è "locked": kill AB + cleanup IPC + relaunch in un solo step (~10-30s vs ~30-60s di shutdown+launch manuale). **NON salva il progetto** (stato unknown se il watcher è locked → rischio corruzione).
 - `diagnose_mcp_state()` → diagnostic read-only: state, heartbeat age, presenza della cartella di sessione IPC, profondità coda comandi, orphan result count, contenuto di `watcher_error.txt` + interpretazione testuale. Usa **PRIMA** di `force_reset_watcher` per verificare che il reset serva davvero (e non sia un'operazione lunga in corso). Se dice **IPC session folder MISSING** (comandi in `ENOENT` su `commands/<id>.py.tmp`) **non** fare `force_reset_watcher`: ucciderebbe un AB sano. Il comando successivo ricrea `commands/` e `results/` da solo e il watcher riprende.
-- `get_mcp_version()` → JSON con mcpVersion, buildSha e lista delle patch attive nel fork.
+- `get_mcp_version()` → versione (SemVer 2.0.0, `docs/PUBLIC-API.md`) e commit della build **caricata dal server**, la build degli script su disco, `restartNeeded` se le due differiscono (gli script si rileggono a ogni chiamata, il TypeScript del server no: serve riavviare Claude Code), e la lista delle patch attive.
 - `get_server_log(lines?)` → coda del `--log-file`: marker di lifecycle (`detachKeepAlive` / `Force-killing` / `soft-probe` / `cause=`). È il modo per capire perché AB si è chiusa.
 - `list_ab_sessions()` → tutte le sessioni AB vive: pid, heartbeat age, progetto aperto, `isMine`, `ownedBy` (`this server` / `another live server` / `nobody` / `unknown` per sessioni avviate da server più vecchi). Da usare su macchina condivisa prima di toccare qualcosa.
 - `attach_codesys(confirm?)` → **Premium-only**. Flusso 2-step: chiamata senza `confirm` → ritorna un path `watcher.py`; l'utente lo esegue da `Tools → Scripting → Execute Script File…`; seconda chiamata con `confirm=true`.
@@ -117,7 +117,7 @@ Elenco completo e sempre aggiornato: `docs/TOOL-CATALOG.md` nel repo (auto-gener
 ### Build
 - `compile_project(projectFilePath, incremental?)` → sincrono, ritorna `N error(s), M warning(s)`, la riga `Build complete -- ...`, il **report di memoria** strutturato (`memoryUsage`: `userProgram` variables/POUs/total/%, `downloadable` used/max/%, `areas` con size/highest used address/largest gap, più le righe `raw`) e il report dei **file di cache** rimossi. Prima le righe di memoria (info, categoria "Memory Usage" + "Memory area N" di Build) venivano scartate e si leggevano solo da screenshot. ⚠️ Di default fa `clean()`, che **cancella** `<prog>.<Device>.<App>.<guid>.compileinfo` / `.bootinfo` / `.bootinfo_guids` accanto al progetto — e un build da scripting, **anche riuscito**, non li riscrive (lo fa solo download / online change / boot application; verificato live 2026-10-17). Nei repo che li tracciano in git, o prima di un online change, usa `incremental=true`. Supporta sia `.project` (compila l'Application via `clean()` + `build()` + `generate_code()`) sia `.library` (Pool Objects via `check_all_pool_objects()`). **Category scan**: enumerazione dinamica UNION i 3 GUID hardcoded delle categorie compile (Build / Precompile / Additional code checks), più re-enumerazione DOPO il build — critico sui library project dove l'enumerazione dinamica può ritornare solo "Script Messages" e nascondere errori C0418/C0046 reali.
 - `get_compile_messages(projectFilePath)` → ultimi messaggi cached (nessun nuovo build), incluso il report di memoria. Stessa logica di category scan; funziona anche sui library project. In modalità headless (un AB per comando) il message store è vuoto: usa l'output di `compile_project`.
-- `run_static_analysis(projectFilePath)` → **Premium**. Esegue la Static Analysis e ritorna i finding. 0 finding se nessun rule set è configurato in Project Settings. **Non** usa l'export SARIF (apre un dialog modale che deadlocka il watcher).
+- Static Analysis (**Premium**): **Non è un tool MCP**: lo script `run_static_analysis.py` esiste ed è stato provato su Premium il 2026-05-30, ma la sua registrazione non è mai arrivata in `server.ts` (scoperto il 2026-11-06 dichiarando l'API pubblica). Registrarlo è una funzione nuova (MINOR) da riprovare su Premium. Il meccanismo provato è descritto nella sezione "Static Analysis" più sotto; **non** usare l'export SARIF (apre un dialog modale che deadlocka il watcher).
 - `create_boot_application(projectFilePath, outputAppPath, writeVisuFiles?)` → genera `.app` + `.crc` deployabile, **offline, senza PLC**. Lancia `generate_code()` prima, così l'immagine è aggiornata. Verificato su AB 2.9 SP19 (215KB `.app` + `.crc`).
 
 ### Libraries
@@ -191,7 +191,7 @@ Elenco completo e sempre aggiornato: `docs/TOOL-CATALOG.md` nel repo (auto-gener
 
 ### Static Analysis (Code Analysis) — Premium
 
-Confermato empiricamente su Premium: la Static Analysis si può **sia lanciare sia leggere** via scripting (il tool `run_static_analysis` fa esattamente questo). Dettagli utili se devi debuggarlo o estenderlo:
+Confermato empiricamente su Premium: la Static Analysis si può **sia lanciare sia leggere** via scripting; lo script `run_static_analysis.py` lo fa, ma **non è registrato come tool MCP**. Dettagli utili per usarlo o per registrarlo:
 
 - ✅ **Trigger**: comando `Run Static Analysis` (`se.system.commands`, guid `ae97b6f4-dc9a-480e-aac8-6061e684f3c0`, tokens `('staticanalysis','run')`) — è uno `ScriptCommand`, `.execute()` gira senza errori.
 - ✅ **Read-back**: i messaggi finiscono nella categoria **"Additional code checks"**, guid **`220493a1-f49b-4416-9a3f-a545db707cbe`**, leggibili con `se.system.get_message_objects(System.Guid('220493a1-...'))`. Stesso identico plumbing di `compile_project`.

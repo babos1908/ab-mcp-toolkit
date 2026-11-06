@@ -6,8 +6,8 @@ Ultimo aggiornamento: 2026-07-02.
 
 ## TL;DR
 
-- **Cosa fa**: 75 tool MCP per aprire `.project`/`.library`, leggere/creare/modificare POU, compilare, cercare nel codice, gestire library repository e release, device tree AC500, task configuration, static analysis, boot application, e (con riserva, vedi sotto) online ops verso il PLC.
-- **Edition richiesta**: AB 2.9 **Standard** o superiore. Alcuni tool sono **Premium-only** (`attach_codesys`, `run_static_analysis`) — vedi tabella edition.
+- **Cosa fa**: 76 tool MCP per aprire `.project`/`.library`, leggere/creare/modificare POU, compilare, cercare nel codice, gestire library repository e release, device tree AC500, task configuration, static analysis, boot application, e (con riserva, vedi sotto) online ops verso il PLC.
+- **Edition richiesta**: AB 2.9 **Standard** o superiore. Alcune funzioni sono **Premium-only** (`attach_codesys`, la Static Analysis) — vedi tabella edition.
 - **Architettura**: persistent UI — il MCP spawna AB visibile e ci comunica via file-based IPC (`.command.json` + script IronPython). Con `--keep-alive` AB sopravvive ai recycle del server MCP.
 - **Trigger automatico**: la skill Claude Code `codesys-ab` si attiva su menzioni di "automation builder", "codesys", "POU", "compile", "AC500", ecc.
 
@@ -83,13 +83,13 @@ Flag che contano davvero:
 
 ## Tool disponibili
 
-**75 tool**, prefisso `mcp__codesys-persistent__`. L'elenco completo con descrizioni è **auto-generato** in [`docs/TOOL-CATALOG.md`](docs/TOOL-CATALOG.md) a ogni `npm run build` — non può andare stale. Categorie:
+**76 tool**, prefisso `mcp__codesys-persistent__`. L'elenco completo con descrizioni è **auto-generato** in [`docs/TOOL-CATALOG.md`](docs/TOOL-CATALOG.md) a ogni `npm run build` — non può andare stale. Categorie:
 
 - **Lifecycle**: `launch_codesys`, `attach_codesys`, `shutdown_codesys`, `get_codesys_status`, `force_reset_watcher`, `diagnose_mcp_state`, `get_mcp_version`, `get_server_log`, `list_ab_sessions`
 - **Project**: `open_project`, `close_project`, `create_project`, `create_ac500_project`, `list_project_templates`, `save_project`, `clean_project`, `create_project_archive`, `inspect_project_tree`, `get_project_info`, `set_project_info`, `cleanup_backups`
 - **Read/Search**: `get_object_code` (singolo oggetto — preferiscilo), `get_all_pou_code`, `search_code`, `find_references`, `get_pou_dependency_graph`, varianti `*_offline`, `export_project_to_plcopen_xml`
 - **CRUD POU**: `create_pou`, `set_pou_code`, `create_method`, `create_property`, `create_dut`, `create_gvl`, `create_folder`, `delete_object`, `rename_object`, `rename_symbol`
-- **Build**: `compile_project`, `get_compile_messages`, `run_static_analysis` (Premium), `create_boot_application`
+- **Build**: `compile_project`, `get_compile_messages`, `create_boot_application`
 - **Libraries**: `list_project_libraries`, `add_library`, `remove_library`, `install_library_to_repository`, `list_library_repository`, `uninstall_library_from_repository`, parametri (`get`/`set`/`reset`/`export`/`import`), `set_library_reference_version`, `rebuild_library`, `release_library_version`, `diff_library_versions`, `diff_libraries_via_export`
 - **Task config (AC500)**: `get_task_configuration`, `set_task_parameter`
 - **Device tree**: `list_device_repository`, `inspect_device_node`, `add_device`, `set_device_parameter`, `map_io_channel`
@@ -101,7 +101,7 @@ Flag che contano davvero:
 |---|---|---|
 | Tutti i tool offline (project/POU/compile/library/device) | ✅ | ✅ |
 | `attach_codesys` (tu apri AB, l'MCP si attacca) | ❌ manca `Tools → Scripting → Execute Script File…` | ✅ **modalità raccomandata su macchina condivisa** |
-| `run_static_analysis` | ❌ add-on Code Analysis assente | ✅ (findings reali solo se un rule set SA è configurato in Project Settings) |
+| Static Analysis (script `run_static_analysis.py`, **non registrato come tool MCP**) | ❌ add-on Code Analysis assente | ✅ scriptabile (findings reali solo con un rule set SA configurato in Project Settings) |
 | Online ops via scripting | ⚠️ vedi sotto | ⚠️ identico a Standard |
 
 ### ⚠️ Stato online ops (leggere prima di usarli)
@@ -121,7 +121,8 @@ Finché non c'è una verifica su PLC reale, il **workaround mixed-mode resta lo 
 **73 patch** in `main`. L'elenco autoritativo con descrizione, root cause e data di validazione è nel manifest `MCP_PATCHES` in [`src/server.ts`](src/server.ts) ed è interrogabile a runtime:
 
 ```
-get_mcp_version()   → mcpVersion + buildSha + lista completa delle patch attive
+get_mcp_version()   → versione e commit della build caricata dal server, build degli script su disco,
+                      restartNeeded se differiscono, lista completa delle patch attive
 ```
 
 Usalo **prima** di assumere che serva un workaround per un bug: potrebbe essere già fissato.
@@ -140,6 +141,8 @@ Macro-aree delle patch:
 - Il 2026-06-29 sono stati integrati selettivamente 4 commit upstream (fix online executor, probing device repository, `create_project` dual-mode, `list_project_templates`). **Non** è stato portato `eval_python` (esecuzione IronPython arbitraria) — decisione esplicita: è espansione di capability, non un bug fix.
 
 ## Aggiornamenti / sync
+
+**Versioni**: dal 1.0.0 il toolkit segue Semantic Versioning 2.0.0. L'API pubblica è dichiarata in [`docs/PUBLIC-API.md`](docs/PUBLIC-API.md), e ogni rilascio ha un tag `vX.Y.Z`. Per installare una versione precisa: `git checkout vX.Y.Z`, poi lo script di setup. Attenzione: `npm run build` è un rilascio (con `npm link` tutte le sessioni della macchina lo usano subito), quindi rifiuta di compilare senza un numero nuovo. La procedura è in `PUBLIC-API.md`.
 
 **Su un clone fresco**, `origin` = `babos1908/ab-mcp-toolkit`. Per seguire anche l'upstream serve aggiungerlo:
 

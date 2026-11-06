@@ -1,6 +1,6 @@
 {
   "name": "codesys-mcp-persistent",
-  "version": "0.6.2",
+  "version": "1.0.0",
   "description": "MCP server for CODESYS with persistent UI instance and file-based IPC",
   "main": "dist/server.js",
   "bin": {
@@ -13,7 +13,8 @@
   ],
   "scripts": {
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
-    "build": "npm run clean && tsc && node -e \"require('fs').cpSync('src/scripts','dist/scripts',{recursive:true})\" && node scripts/gen-tool-catalog.js",
+    "build": "node scripts/release-guard.js && npm run clean && tsc && node -e \"require('fs').cpSync('src/scripts','dist/scripts',{recursive:true})\" && node scripts/gen-tool-catalog.js && node scripts/write-build-info.js",
+    "docs": "node scripts/gen-tool-catalog.js",
     "test": "vitest --run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
@@ -30,9 +31,9 @@
   "author": "luke-harriman",
   "repository": {
     "type": "git",
-    "url": "https://github.com/luke-harriman/Codesys-MCP.git"
+    "url": "https://github.com/babos1908/ab-mcp-toolkit.git"
   },
-  "homepage": "https://github.com/luke-harriman/Codesys-MCP#readme",
+  "homepage": "https://github.com/babos1908/ab-mcp-toolkit#readme",
   "license": "MIT",
   "engines": {
     "node": ">=18"

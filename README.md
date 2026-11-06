@@ -13,7 +13,7 @@ Unlike headless-only approaches that spawn a new CODESYS process per command, th
 - **File-based IPC** - proven approach using atomic file writes and a Python watcher script
 - **Command serialization** - async mutex ensures one command at a time
 - **Health monitoring** - detects CODESYS crashes and reports state
-- **75 MCP tools** ([full catalog](docs/TOOL-CATALOG.md)) - project management, POU authoring, structured compiler diagnostics, runtime monitoring, simulation, library management, code search, refactor, device tree, fieldbus I/O mapping, archiving
+- **76 MCP tools** ([full catalog with every parameter](docs/TOOL-CATALOG.md); versioned per [SemVer 2.0.0](docs/PUBLIC-API.md)) - project management, POU authoring, structured compiler diagnostics, runtime monitoring, simulation, library management, code search, refactor, device tree, fieldbus I/O mapping, archiving
 - **Drop-in replacement** - same MCP tool names and parameters as `@codesys/mcp-toolkit` (the original toolkit's surface is a strict subset)
 
 ## Installation

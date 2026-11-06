@@ -1,6 +1,53 @@
 # Changelog
 
-## Unreleased — 2026-10-17
+This project follows [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) from 1.0.0 on; its public API is declared in [docs/PUBLIC-API.md](docs/PUBLIC-API.md).
+
+## 1.0.0 — 2026-11-06
+
+The first release of this fork with a version number of its own, and the first with a declared public API: [docs/PUBLIC-API.md](docs/PUBLIC-API.md). From now on every build is a new number.
+
+### Builds mislabelled 0.6.2 (2026-05-09 to 2026-10-18)
+
+`0.6.2` is the upstream release by Luke Harriman (commit `6cf0c08`, 2026-05-09). On top of it this fork added 77 commits, up to `97aa31b` on 2026-10-18. Each was built and served to every Claude session on the machine through `npm link`, while `package.json` and `get_mcp_version` kept saying `0.6.2`: one number for dozens of different builds, and the number of a release that is not this fork's. Upstream has since published `0.6.3` (2026-05-31), so that number is taken too.
+
+They are not renumbered after the fact. A released version does not change, and these builds cannot be told apart anyway: `get_mcp_version` reported the version from `package.json` and, as its "build" commit, the repository HEAD at the moment of the call -- not what the running server had loaded. They are recorded here as what they were. Anything from this fork reporting `0.6.2` is one of them, and `1.0.0` is the first build that can say which one it is.
+
+### What 1.0.0 contains, relative to upstream 0.6.2
+
+Measured on the tool API, 1.0.0 only extends upstream 0.6.2: 39 tools became 76, nothing was removed or made incompatible.
+
+- **37 new tools.** Lifecycle: `attach_codesys`, `force_reset_watcher`, `diagnose_mcp_state`, `get_mcp_version`, `get_server_log`, `list_ab_sessions`. Projects: `close_project`, `clean_project`, `create_ac500_project`, `list_project_templates`, `inspect_project_tree`, `get_project_info`, `set_project_info`, `cleanup_backups`, `create_boot_application`. Code: `get_object_code`, `get_pou_dependency_graph`, `get_all_pou_code_offline`, `search_code_offline`, `export_project_to_plcopen_xml`. Libraries: `remove_library`, `install_library_to_repository`, `list_library_repository`, `uninstall_library_from_repository`, `get_library_parameters`, `set_library_parameter`, `reset_library_parameter`, `export_library_parameters`, `import_library_parameters`, `set_library_reference_version`, `rebuild_library`, `release_library_version`, `diff_library_versions`, `diff_libraries_via_export`. Tasks: `get_task_configuration`, `set_task_parameter`, `create_task`.
+- **Compatible additions to existing tools:**
+  - `compile_project`: `incremental`;
+  - `create_pou`: `returnType`, plus the types `Interface` and `ParameterList`;
+  - `create_project`: `templatePath`, `templateName`;
+  - `create_method`: `name` as an alias, which makes `methodName` optional;
+  - `launch_codesys`: `projectFilePath`.
+- **Shared-machine robustness.** Sessions survive client recycles (keep-alive and adoption). A live probe runs before adopting a session. Ownership markers make sure one server never takes or breaks another's live AB session. Before a force reset, a soft probe checks whether AB is only busy. The watcher has a guard against modal dialogs. Teardown is logged to `--log-file`.
+- **No silent false successes.** Every setter reads its write back and fails with `ERR_WRITE_DID_NOT_STICK` (or the reset and rename variants) when it did not take. Errors carry a code from `MCPErrorCode`.
+- **AB 2.9 / AC500 V3 field fixes:**
+  - task intervals and watchdog times are IEC TIME literals, and priority and sensitivity are strings;
+  - Library Manager references go through `lm.references`, across both managers;
+  - library parameters are overrides, validated against the library source;
+  - repository entries are found by `title`, and uninstalled repository-first;
+  - placeholder versions are set as redirections;
+  - read-only Released projects are detected;
+  - the memory report is returned in a structured form;
+  - incremental compile is available.
+- **Online operations:** the executor fallback ported from upstream `a063aad` is in, still unverified on AB 2.9 / SP19.
+- Change by change: the sections below (from 2026-10-17) and the patch list returned by `get_mcp_version`.
+
+### Changed in 1.0.0
+
+- The version is `1.0.0`. The server now announces it to MCP clients: until now it said `0.1.0`, hardcoded. `package.json` points at this fork, no longer at the upstream repository.
+- `get_mcp_version` reports the build the server process actually loaded: version, commit and build time, stamped into `dist/build-info.json` by `npm run build`. It also reports the build whose scripts are on disk, and `restartNeeded` when the two differ. That happens because scripts are re-read on every call, while the server's TypeScript is not.
+- `npm run build` starts with a release guard. It refuses an invalid version, uncommitted `src/`, a version lower than the last tag, a number already tagged or built with different content, and a tool API change larger than the version allows. 11 tests cover it on throw-away git repositories; disabling any one rule fails exactly the tests for that rule.
+- `docs/TOOL-CATALOG.md` now lists every parameter -- name, type, required, constraints, allowed values. It is read from the source through the TypeScript compiler API, so it is exact, spread parameter sets included; `npm run docs` regenerates it.
+- Docs corrected: the skill and `ONBOARDING.md` described a `run_static_analysis` tool that was never registered. Only its script exists. Registering it would be a new MINOR feature, to be retested on Premium.
+
+## Fork changes 2026-10-17 to 2026-10-18 -- served as mislabelled 0.6.2, included in 1.0.0
+
+This section was headed "Unreleased" although every change in it had already been built and served to all sessions (see 1.0.0 above). Its content is unchanged.
 
 Nine limits hit while cleaning up MPLUS IO 1.4.0 and starting 1.5.0 (AB 2.9 SP19 Premium, AC500 V3 PM5032), each of which forced a detour through the AB GUI. Every fix was first reproduced with live probes in a separate headless AB on temporary copies of the project and a throw-away library; the findings below are what AB actually did, not what the stubs suggest.
 
