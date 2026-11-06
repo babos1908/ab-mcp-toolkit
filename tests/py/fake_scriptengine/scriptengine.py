@@ -377,12 +377,32 @@ class LibraryManager(object):
         self.file_meta = {}   # library file path -> the display it installs as
 
     def install_library(self, path, repo=None, overwrite=False):
+        """As live AB 2.9 (probe_install 2026-11-06): the identity is the
+        file's Project Information ('Title, version (Company)'); with
+        overwrite=False a number already installed raises "Library already
+        exists"; the repository holds a byte-for-byte COPY of the file, so a
+        later edit of the source is detectable."""
         if repo is None:
             raise TypeError("Value cannot be null.\nParameter name: repo")
+        proj = projects.openable.get(path)
+        if proj is not None:
+            i = proj.info
+            display = '%s, %s (%s)' % (i.title, i.version, i.company)
+        else:
+            display = self.file_meta.get(path) or '%s, 0.0.1 (Fake)' % os.path.splitext(os.path.basename(path))[0]
+        if display in self.by_display and not overwrite:
+            raise IOError("System.IO.IOException: Library already exists.")
+        copy = '%s.%s.repo-copy' % (path, len(self.installed))
+        try:
+            with open(path, 'rb') as src:
+                data = src.read()
+            with open(copy, 'wb') as dst:
+                dst.write(data)
+        except IOError:
+            copy = path  # fixtures that install a path with no file behind it
         self.installed.append(path)
-        CALLS.append(('install_library', path))
-        display = self.file_meta.get(path) or '%s, 0.0.1 (Fake)' % os.path.splitext(os.path.basename(path))[0]
-        ml = ManagedLib(display, path)
+        CALLS.append(('install_library', path, bool(overwrite)))
+        ml = ManagedLib(display, copy)
         self.by_display[display] = ml
         return ml
 

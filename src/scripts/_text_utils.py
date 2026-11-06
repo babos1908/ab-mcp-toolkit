@@ -887,3 +887,91 @@ def time_value_to_ms(v):
         return float(v)
     except Exception:
         return None
+
+
+# ------------------------------------------------------- library releases
+#
+# Rule (global CLAUDE.md, SemVer 2.0.0): a library is installed already
+# Released, and every installed build has its own number -- never reinstall
+# different content under a name+version that is already installed.
+# Live AB 2.9 SP19 (probe_install, 2026-11-06):
+#   * the repository identity of a library is its Project Information:
+#     'Title, version (Company)';
+#   * opening the file as a secondary project (primary=False) reads it
+#     without changing a byte;
+#   * install_library(path, repo, overwrite=False) refuses a number that is
+#     already installed ("Library already exists");
+#   * the installed file is a byte-for-byte copy of the source, so an equal
+#     sha256 means the very same build, and any edit -- even only the
+#     Released flag -- changes it.
+
+def is_semver_core(v):
+    """True for MAJOR.MINOR.PATCH: three integers, no leading zeros, nothing
+    more. AB's Version field takes numbers only, so a library version cannot
+    carry a pre-release suffix, and a fourth number is a defect."""
+    import re as _re
+    return bool(_re.match(r'^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$', _to_unicode(v).strip()))
+
+
+def file_sha256(path):
+    import hashlib as _hashlib
+    h = _hashlib.sha256()
+    with open(path, 'rb') as f:
+        while True:
+            chunk = f.read(1 << 20)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def library_identity(path):
+    """Title, version, company and Released flag of the library file at
+    `path`, from its Project Information, plus its repository display string.
+    Uses the project if it is already open; otherwise opens it as a SECONDARY
+    project (the user's primary project is untouched) and closes it again.
+    'project' is the open project object, or None when it was opened here."""
+    import os as _os
+    import scriptengine as _se
+    norm = _os.path.normcase(_os.path.abspath(path))
+    already = None
+    try:
+        for p in _se.projects.all:
+            if _os.path.normcase(_os.path.abspath(p.path)) == norm:
+                already = p
+                break
+    except Exception:
+        already = None
+    proj = already
+    try:
+        if proj is None:
+            flags = _se.VersionUpdateFlags.NoUpdates | _se.VersionUpdateFlags.SilentMode
+            proj = _se.projects.open(path, primary=False, update_flags=flags)
+        info = proj.get_project_info()
+        title = _to_unicode(info.title).strip()
+        version = _to_unicode(info.version).strip()
+        company = _to_unicode(info.company).strip()
+        primary = False
+        try:
+            cur = _se.projects.primary
+            primary = cur is not None and _os.path.normcase(_os.path.abspath(cur.path)) == norm
+        except Exception:
+            primary = False
+        dirty = None
+        try:
+            dirty = bool(proj.dirty)
+        except Exception:
+            dirty = None
+        return {
+            'title': title, 'version': version, 'company': company,
+            'released': bool(info.released),
+            'display': u'%s, %s (%s)' % (title, version, company),
+            'primary': primary, 'dirty': dirty,
+            'project': already,
+        }
+    finally:
+        if already is None and proj is not None:
+            try:
+                proj.close()
+            except Exception:
+                pass

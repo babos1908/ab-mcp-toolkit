@@ -124,7 +124,7 @@ Elenco completo e sempre aggiornato: `docs/TOOL-CATALOG.md` nel repo (auto-gener
 - `list_project_libraries(projectFilePath)` → riferimenti correnti di **tutti** i Library Manager (un progetto applicativo ne ha due: quello dell'Application e quello radice del POU pool), marcando i placeholder (`#X -> libreria risolta`) e i riferimenti di sistema.
 - `add_library(projectFilePath, libraryName, version?, ...)` → nome **fully-qualified**, es. `'Pm, 1.2.11.4 (ABB)'`. ⚠️ Il campo company deve essere quello con cui la lib è **registrata nel repository**, che non sempre è il vendor "storico": per le lib 3S serve `'Net Base Services, 4.0.0.0 (CODESYS)'` — con `(3S - Smart Software Solutions GmbH)` fallisce con `ERR_LIB_NOT_FOUND` (osservato 2026-10-12 su Premium). Se non sei sicuro del company esatto, guarda sul disco: `C:\ProgramData\AutomationBuilder\AB_Managed Libraries_2.9\<Company>\<Lib>\<ver>\`.
 - `remove_library(projectFilePath, libraryName)` → rimuove un **riferimento** (placeholder o gestito) da qualunque Library Manager. ⚠️ Il prefisso `#` vuol dire solo **placeholder**, non sistema: su AC500 V3 tutte le lib aggiunte per nome sono placeholder (`#LogiQ`, `#MProtocol`, `#AC500-V3-library-MQTT`). Fino al 2026-10-17 il tool le rifiutava tutte; ora rifiuta solo quelle con `system_library=True` (IoDrv*, Standard, IoStandard, `#System_Visu*`: le aggiunge il device o un plug-in). Accetta il display string, il nome senza `#`, il nome base (`AC500-V3-utilities-web`), la libreria risolta (`MProtocol-library`), la forma di `list_project_libraries` o una sottostringa univoca.
-- `install_library_to_repository(libraryProjectFilePath, repositoryName?)` → installa il **file** `.library` nel Library Repository (come "File → Save Project and Install into Library Repository" o "Tools → Library Repository → Install"). **Critico nel library dev**: senza, i consumer continuano a vedere la versione precedente. Stesso nome+versione → overwrite; altrimenti installazione side-by-side. Se la lib non è il progetto aperto la installa dal disco **senza aprirla** (il progetto dell'utente non viene cambiato); se è aperta salva solo se ha modifiche. Funziona con le librerie **Released** (prima falliva sul save read-only: MProtocol 1.0.0, LogiQ 0.0.2).
+- `install_library_to_repository(libraryProjectFilePath, repositoryName?)` → installa il **file** `.library` nel Library Repository (come "File → Save Project and Install into Library Repository" o "Tools → Library Repository → Install"). **Critico nel library dev**: senza, i consumer continuano a vedere la versione precedente. **Dalla 2.0.0 non sovrascrive mai**: la lib dev'essere **Released** (altrimenti `ERR_LIB_NOT_RELEASED`), la versione `MAJOR.MINOR.PATCH` (altrimenti `ERR_BAD_INPUT`); lo **stesso build** già installato è un'operazione nulla (il file installato è una copia byte per byte, verificato live), **stesso numero con contenuto diverso** → `ERR_LIB_EXISTS` (una correzione è la PATCH successiva). Dopo l'installazione rilegge il file dal repository. Legge l'identità (`Titolo, versione (Azienda)` dal Project Information) aprendo la lib come progetto **secondario**: il progetto dell'utente non cambia. Fino alla 1.0.0 passava `overwrite=True` e sovrascriveva in silenzio.
   - ⚠️ SemVer (CLAUDE.md globale): non installare mai un contenuto diverso con un nome e una versione già installati. Anche il solo flag Released cambia il file: alza prima il numero.
 - `list_library_repository(nameFilter?)` → per ogni libreria installata: nome, versione, azienda e la stringa **`display`** esatta (`'Titolo, versione (Azienda)'`, quella che vogliono `add_library` e `set_library_reference_version`); con il filtro anche il percorso del file `.library`. Fino al 2026-10-18 tornava **0 nomi** su centinaia di voci: le voci del repository hanno il nome in `title`, non in `name`.
 - `uninstall_library_from_repository(libraryName, version, repositoryName?)` (`version='*'` per tutte) → accetta il titolo o la stringa completa, confronta il titolo **esatto** (mai una sottostringa: `McpProbeLib` non tocca `McpProbeLib2`) e rilegge ogni rimozione. Se non trova nulla elenca le versioni effettivamente installate. Ricorda che il repository è **condiviso** da tutti i progetti della macchina.
@@ -142,8 +142,8 @@ Elenco completo e sempre aggiornato: `docs/TOOL-CATALOG.md` nel repo (auto-gener
 
 > **File che si accumulano nella cartella della libreria**: il `.compiled-library` è l'artifact atteso di `save_as_compiled_library`. I `<nome>.library.backup-<TS>Z` invece sono gli snapshot automatici pre-modifica, e **non sono illimitati**: ne vengono tenuti `--backup-retention` (default **5**, da cui "cinque backup per sessione"). Se ne vuoi meno, abbassa il flag nella registrazione MCP (`--backup-retention 1`, oppure `0` = illimitato — non quello che vuoi); per ripulire quelli già lì c'è `cleanup_backups`, che tocca **solo** i file col pattern timestampato esatto e mai i `<nome>.backup` manuali.
 
-> ⚠️ **Progetto/libreria "Released"**: AB lo riapre in **sola lettura** e ogni `save()` fallisce con "opened in read-only mode" (anche senza modifiche; `allow_readonly` non cambia nulla — verificato live 2026-10-17). I tool che salvano rispondono `ERR_PROJECT_READ_ONLY` con la soluzione: `set_project_info(released=false)` (più bump di versione: una versione rilasciata non va cambiata), che sblocca nella stessa sessione. Per **installare** una lib rilasciata non serve sbloccarla: `install_library_to_repository` la installa così com'è.
-- `release_library_version(libraryProjectFilePath, version, distFolder?, gitTag?, ghRelease?)` → orchestratore: set_project_info → rebuild → install → copia in distFolder → opzionale git tag + gh release.
+> ⚠️ **Progetto/libreria "Released"**: AB lo riapre in **sola lettura** e ogni `save()` fallisce con "opened in read-only mode" (anche senza modifiche; `allow_readonly` non cambia nulla — verificato live 2026-10-17). I tool che salvano rispondono `ERR_PROJECT_READ_ONLY` con la soluzione: `set_project_info(released=false)` (più bump di versione: una versione rilasciata non va cambiata), che sblocca nella stessa sessione. Per **installare** una lib rilasciata non serve sbloccarla: `install_library_to_repository` la installa così com'è -- ed è l'**unico** stato in cui la installa (regola globale: una libreria si installa già Released).
+- `release_library_version(libraryProjectFilePath, version, distFolder?, gitTag?, ghRelease?)` → orchestratore conforme a SemVer (2.0.0): (1) rifiuta una versione non `MAJOR.MINOR.PATCH` o **già installata** -- prima di toccare la lib; (2) imposta la versione togliendo Released per poterla modificare; (3) rebuild; (4) **marca Released**; (5) installa (con rilettura); poi copia in distFolder e opzionale git tag + gh release. Fino alla 1.0.0 installava senza Released e una seconda esecuzione con lo stesso numero sovrascriveva il build installato.
 - `diff_library_versions(sourceLibraryPath, targetLibraryPath)` → diff strutturato tra 2 versioni **da XML** (no AB). Per i `.library` nativi (binari) usa `diff_libraries_via_export`.
 - `diff_libraries_via_export(sourceLibraryPath, targetLibraryPath, xmlOutputDir?, keepXml?)` → composite: apre lib A → export XML → chiude; idem lib B; diff. ~30-90s perché fa round-trip su AB due volte.
 
@@ -240,16 +240,17 @@ if N > 0:
 # dettaglio completo su disco: %TEMP%\codesys-mcp-compile-debug.txt
 ```
 
-### Workflow release library v1.0.x
+### Workflow release library (SemVer 2.0.0)
 ```
-1. set_project_info(libPath, version='1.0.11')
-2. rebuild_library(libPath)
-3. install_library_to_repository(libPath)
-4. (nel consumer) reset_library_parameter(...) per eventuali override stale
-5. (nel consumer) compile_project + download
-# Tutto in uno step:
+# Un passo solo -- fa tutto nell'ordine giusto e rifiuta un numero già preso:
 release_library_version(libPath, '1.0.11', distFolder='./dist', gitTag=true)
+#   = precheck (1.0.11 libero?) -> set_project_info(version, released=false)
+#     -> rebuild_library -> set_project_info(released=true) -> install (rilettura)
+# Poi nei consumer:
+#   reset_library_parameter(...) per eventuali override stale
+#   compile_project + download
 ```
+Regole (CLAUDE.md globale): una lib si installa **già Released**; ogni build installato o scaricato su un PLC ha **il suo numero**, anche se cambia solo il flag Released o il salvataggio di AB; un difetto trovato dopo è la **PATCH successiva** (es. 1.3.0 → 1.3.1). Mai quattro numeri. Quindi ogni installazione per provare la lib nei consumer è già un rilascio con il suo numero.
 
 ### Diff fra 2 versioni library (`.library` è binary!)
 ```

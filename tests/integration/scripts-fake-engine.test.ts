@@ -248,48 +248,124 @@ ref(w['app_lm'], '#Util').parameters['IBLOCKSIZE'] = ''
   });
 
   // ------------------------------------------------- #2 install_library_to_repository
+  // 2.0.0: a library is installed already Released and a taken number is
+  // never overwritten (SemVer rule). Shapes from probe_install 2026-11-06:
+  // identity = Project Information, overwrite=False refuses a taken number,
+  // the repository keeps a byte-for-byte copy.
   describe('install_library_to_repository', () => {
-    const LIBFX = (opts: { open: boolean; released: boolean; dirty: boolean }) => `
+    type Fx = { open: boolean; released: boolean; dirty: boolean; version?: string;
+                releasedInSession?: boolean; preinstall?: boolean; changeAfter?: boolean };
+    const LIBFX = (o: Fx) => `
 from worlds import *
-lib = se.Project(WEB_LIB, [], released=${opts.released ? 'True' : 'False'})
-lib.dirty = ${opts.dirty ? 'True' : 'False'}
+open(WEB_LIB, 'wb').write(b'build-1')
+lib = se.Project(WEB_LIB, [], released=${o.released && !o.releasedInSession ? 'True' : 'False'})
+lib.info.title, lib.info.company, lib.info.version = 'WebLib', 'ABB', '${o.version ?? '1.3.0'}'
+${o.releasedInSession ? 'lib.info.released = True' : ''}
+lib.dirty = ${o.dirty ? 'True' : 'False'}
+se.projects.openable[WEB_LIB] = lib
 other = se.Project(PROJECT, [])
-se.projects.primary = ${opts.open ? 'lib' : 'other'}
+se.projects.primary = ${o.open ? 'lib' : 'other'}
 se.projects.all = [se.projects.primary]
+${o.preinstall ? "se.librarymanager.install_library(WEB_LIB, se.librarymanager.repositories[0], False)" : ''}
+${o.changeAfter ? "open(WEB_LIB, 'wb').write(b'build-2, same number')" : ''}
 def dump():
-    return {'installed': se.librarymanager.installed, 'opens': se.projects.open_calls,
-            'libSaves': lib.saves, 'primaryIsOther': se.projects.primary is other}
+    return {'installed': len(se.librarymanager.installed), 'opens': se.projects.open_calls,
+            'libSaves': lib.saves, 'primaryIsOther': se.projects.primary is other,
+            'repo': sorted(se.librarymanager.by_display.keys()),
+            'overwrites': [c for c in se.CALLS if c[0] == 'install_library' and c[2]]}
 `;
-    const runInstall = (opts: { open: boolean; released: boolean; dirty: boolean }) =>
-      runWithLibPath('install_library_to_repository', { REPOSITORY_NAME: '' }, LIBFX(opts));
+    const runInstall = (o: Fx) => runWithLibPath('install_library_to_repository', { REPOSITORY_NAME: '' }, LIBFX(o));
 
-    it('not open: installs from the file without opening anything', () => {
+    it('installs a Released library, reading its identity as a SECONDARY project (primary untouched)', () => {
       const r = runInstall({ open: false, released: true, dirty: false });
-      expect(ok(r)).toBe(true);
-      expect(r.state.installed).toHaveLength(1);
-      expect(r.state.opens).toEqual([]);
+      expect(ok(r), r.output).toBe(true);
+      expect(r.state.installed).toBe(1);
+      expect(r.state.repo).toContain('WebLib, 1.3.0 (ABB)');
+      expect(r.state.opens).toEqual([[expect.stringContaining('AC500-V3-utilities-web'), false]]);
       expect(r.state.primaryIsOther).toBe(true);
-      expect(r.output).toContain('not open: installed from the file');
+      expect(r.state.overwrites).toEqual([]); // never overwrite=True
+      expect(r.result).toMatchObject({ library: 'WebLib, 1.3.0 (ABB)', installed: true, alreadyInstalled: false });
     });
 
-    it('open, Released, no unsaved changes: save skipped, install works (was: read-only save error)', () => {
-      const r = runInstall({ open: true, released: true, dirty: false });
-      expect(ok(r)).toBe(true);
-      expect(r.state.libSaves).toBe(0);
-      expect(r.state.installed).toHaveLength(1);
-    });
-
-    it('open with unsaved changes: saved first', () => {
+    it('refuses a library that is not Released, without saving or installing anything', () => {
       const r = runInstall({ open: true, released: false, dirty: true });
-      expect(ok(r)).toBe(true);
-      expect(r.state.libSaves).toBe(1);
+      expect(ok(r)).toBe(false);
+      expect(r.code).toBe('ERR_LIB_NOT_RELEASED');
+      expect(r.state.installed).toBe(0);
+      expect(r.state.libSaves).toBe(0);
     });
 
-    it('open, Released AND dirty: refuses with ERR_PROJECT_READ_ONLY (edits would not be installed)', () => {
+    it('the very same build already installed is a no-op, not a reinstall', () => {
+      const r = runInstall({ open: false, released: true, dirty: false, preinstall: true });
+      expect(ok(r), r.output).toBe(true);
+      expect(r.state.installed).toBe(1); // only the fixture's install
+      expect(r.result).toMatchObject({ installed: false, alreadyInstalled: true });
+    });
+
+    it('refuses the same number with different content -- even only the Released flag -- (ERR_LIB_EXISTS)', () => {
+      const r = runInstall({ open: false, released: true, dirty: false, preinstall: true, changeAfter: true });
+      expect(ok(r)).toBe(false);
+      expect(r.code).toBe('ERR_LIB_EXISTS');
+      expect(r.output).toContain('next PATCH');
+      expect(r.state.installed).toBe(1);
+    });
+
+    it('refuses a fourth version number', () => {
+      const r = runInstall({ open: false, released: true, dirty: false, version: '1.3.0.0' });
+      expect(ok(r)).toBe(false);
+      expect(r.code).toBe('ERR_BAD_INPUT');
+      expect(r.state.installed).toBe(0);
+    });
+
+    it('open, opened Released AND dirty: ERR_PROJECT_READ_ONLY (its edits could not be installed)', () => {
       const r = runInstall({ open: true, released: true, dirty: true });
       expect(ok(r)).toBe(false);
       expect(r.code).toBe('ERR_PROJECT_READ_ONLY');
-      expect(r.state.installed).toEqual([]);
+      expect(r.state.installed).toBe(0);
+    });
+
+    it('released in this session with unsaved edits: saved first, then installed (the release_library_version path)', () => {
+      const r = runInstall({ open: true, released: true, releasedInSession: true, dirty: true });
+      expect(ok(r), r.output).toBe(true);
+      expect(r.state.libSaves).toBe(1);
+      expect(r.state.installed).toBe(1);
+    });
+  });
+
+  describe('library_release_precheck', () => {
+    const PRE = (installed: string[]) => `
+from worlds import *
+lib = se.Project(WEB_LIB, [])
+lib.info.title, lib.info.company, lib.info.version = 'WebLib', 'ABB', '1.3.0'
+se.projects.openable[WEB_LIB] = lib
+se.projects.primary = se.Project(PROJECT, [])
+se.projects.all = [se.projects.primary]
+for d in ${JSON.stringify(installed)}:
+    se.librarymanager.by_display[d] = se.ManagedLib(d)
+def dump():
+    return {'saves': lib.saves}
+`;
+    const runPre = (version: string, installed: string[]) =>
+      runWithLibPath('library_release_precheck', { VERSION: version }, PRE(installed));
+
+    it('a free number passes, and nothing is written', () => {
+      const r = runPre('1.3.1', ['WebLib, 1.3.0 (ABB)']);
+      expect(ok(r), r.output).toBe(true);
+      expect(r.result).toMatchObject({ targetInstalled: false, currentVersion: '1.3.0', installedVersions: ['WebLib, 1.3.0 (ABB)'] });
+      expect(r.state.saves).toBe(0);
+    });
+
+    it('a taken number is ERR_LIB_EXISTS, listing what is installed', () => {
+      const r = runPre('1.3.0', ['WebLib, 1.3.0 (ABB)']);
+      expect(ok(r)).toBe(false);
+      expect(r.code).toBe('ERR_LIB_EXISTS');
+      expect(r.output).toContain('installed: WebLib, 1.3.0 (ABB)');
+    });
+
+    it('a fourth number or a pre-release suffix is ERR_BAD_INPUT (AB takes numbers only)', () => {
+      expect(runPre('1.3.1.0', []).code).toBe('ERR_BAD_INPUT');
+      expect(runPre('1.4.0-rc.1', []).code).toBe('ERR_BAD_INPUT');
+      expect(runPre('01.3.1', []).code).toBe('ERR_BAD_INPUT');
     });
   });
 

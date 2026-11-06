@@ -2,6 +2,46 @@
 
 This project follows [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) from 1.0.0 on; its public API is declared in [docs/PUBLIC-API.md](docs/PUBLIC-API.md).
 
+## 2.0.0 — 2026-11-06
+
+Brings the two library tools in line with the versioning rule (SemVer 2.0.0, global CLAUDE.md): a library is installed already Released, and every installed build has its own `MAJOR.MINOR.PATCH` number -- even when only the Released flag or AB's save changes the file, and a defect found later is the next PATCH. In 1.0.0 both tools contradicted that by contract, so aligning them changes documented behaviour: MAJOR.
+
+### Breaking changes
+
+- **`install_library_to_repository` no longer overwrites.** It was documented as "overwrites the same version" and passed `overwrite=True`, so a different build silently replaced an installed name+version. Now:
+  - the same build already installed is a successful no-op (`alreadyInstalled: true`);
+  - the same number with different content is `ERR_LIB_EXISTS`, with nothing installed;
+  - a library that is not Released is `ERR_LIB_NOT_RELEASED` (new error code), with nothing saved or installed;
+  - a version that is not `MAJOR.MINOR.PATCH` is `ERR_BAD_INPUT`;
+  - otherwise it installs with `overwrite=False` and reads the install back byte for byte (`ERR_WRITE_DID_NOT_STICK` if it does not match).
+
+  The library's identity is read from its Project Information by opening it as a secondary project, so the user's primary project is never switched.
+- **`release_library_version` follows the rule end to end.** It now:
+  1. refuses a version that is not `MAJOR.MINOR.PATCH`, or that is already installed, before touching the library (it used to document `MAJOR.MINOR.PATCH[.BUILD]`);
+  2. sets the version and clears Released for the edit;
+  3. rebuilds;
+  4. marks the library Released;
+  5. installs it.
+
+  Before, it installed without Released, and a second run with the same number overwrote the installed build. The result carries `errorCode`.
+
+### Facts this rests on (live AB 2.9 SP19, headless, throw-away library)
+
+- The repository identity is `Title, version (Company)` from the Project Information.
+- Opening the file as a secondary project reads it without changing a byte.
+- `install_library(path, repo, overwrite=False)` refuses a taken number ("Library already exists").
+- The installed file is a byte-for-byte copy of the source (same sha256, same size), and any edit -- even only the Released flag -- changes it.
+
+### Also
+
+- `extractErrorCode` moved to `src/result-parser.ts`, so the new `src/library-release.ts` -- `release_library_version` as a testable function -- can share it.
+- Tests:
+  - 7 fake-engine cases for the install, 5 of which fail against the 1.0.0 script, while the other 2 cover behaviour kept on purpose;
+  - 3 for the release precheck;
+  - 4 for the orchestration order and where it stops.
+
+  The fake engine now refuses a taken number without `overwrite` and keeps a byte copy, as AB does.
+
 ## 1.0.0 — 2026-11-06
 
 The first release of this fork with a version number of its own, and the first with a declared public API: [docs/PUBLIC-API.md](docs/PUBLIC-API.md). From now on every build is a new number.

@@ -504,7 +504,7 @@ JSON dump of the project tree (devices, POUs, GVLs, DUTs, folders, tasks, others
 
 ## install_library_to_repository
 
-Installs a .library file into the Library Repository (overwrites the same version). Saves first only if it is the open project with unsaved edits; Released libraries work.
+Installs a Released .library into the Library Repository, never overwriting: the same build already installed is a no-op, the same name+version with different content is ERR_LIB_EXISTS (a fix is the next PATCH), a library not marked Released is ERR_LIB_NOT_RELEASED, a version that is not MAJOR.MINOR.PATCH is ERR_BAD_INPUT. The install is read back byte for byte. The user's primary project is not switched.
 
 | Parameter | Type | Required | Constraints | Description |
 |---|---|---|---|---|
@@ -610,12 +610,12 @@ Force a full rebuild of a .library project. Runs target_app.clean() (cache inval
 
 ## release_library_version
 
-Orchestrate a library release in a single tool call: (1) set_project_info with the new version, (2) rebuild_library, (3) install_library_to_repository, (4) copy the .library file to distFolder/v{version}/{name}-v{version}.library, and optionally (5) `git tag` + `gh release create` against the repo. Each step is conditional and failures surface step-by-step in the returned JSON. Safer than scripting these calls manually because the steps run in the right order with shared error context.
+Release a library in one call, following SemVer 2.0.0: (1) refuse a version that is not MAJOR.MINOR.PATCH or is already installed -- before touching anything; (2) set the version, clearing Released for the edit; (3) rebuild_library; (4) mark Released; (5) install_library_to_repository, which reads the install back; optionally (6) copy to distFolder/v{version}/{name}-v{version}.library, git tag v{version}, gh release. A library is installed already Released, and a taken number is never overwritten: a fix is the next PATCH. Every step is reported in the returned JSON.
 
 | Parameter | Type | Required | Constraints | Description |
 |---|---|---|---|---|
 | `libraryProjectFilePath` | string | yes |  | Path to the .library project file to release. |
-| `version` | string | yes | min 1 | New version string (e.g. '1.0.11'). Format: MAJOR.MINOR.PATCH[.BUILD]. |
+| `version` | string | yes | min 1 | New version, MAJOR.MINOR.PATCH only (e.g. '1.0.11'): AB's Version field takes numbers only, and a fourth number is a defect. Must not be installed yet. |
 | `distFolder` | string | no |  | Optional path to a dist folder. The .library file is copied to {distFolder}/v{version}/{name}-v{version}.library after install. |
 | `gitTag` | boolean | no |  | If true, run 'git tag v{version}' in the library's repo directory after install. Off by default. |
 | `ghRelease` | boolean | no |  | If true and gitTag is also true, run 'gh release create v{version} --generate-notes' after the tag. Off by default. |

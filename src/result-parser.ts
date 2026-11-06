@@ -49,3 +49,18 @@ export function parseResultJson<T = unknown>(output: string): ParseResult<T> {
     return { ok: false, error: `RESULT_JSON parse failed: ${msg}` };
   }
 }
+
+/**
+ * The error code a script reported: the LAST `SCRIPT_ERROR_CODE: X` line in
+ * its output (a later, more specific code wins over an earlier generic one).
+ */
+export function extractErrorCode(output: string): string | null {
+  const marker = 'SCRIPT_ERROR_CODE:';
+  const idx = output.lastIndexOf(marker);
+  if (idx === -1) return null;
+  // Take the rest of that line (until \n or end) and trim.
+  const rest = output.slice(idx + marker.length);
+  const nl = rest.indexOf('\n');
+  const code = (nl === -1 ? rest : rest.slice(0, nl)).trim();
+  return code || null;
+}

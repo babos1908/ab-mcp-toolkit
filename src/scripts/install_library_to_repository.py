@@ -1,327 +1,158 @@
 import sys, scriptengine as script_engine, os, traceback
 
-# Optional name of the target repository. If empty, the script tries the
-# manager-level install_library() first (which internally picks the default
-# writable repository) and falls back to per-repo install only if needed.
+# Optional name of the target repository. If empty: a repository named like
+# 'user' / 'default', else the first one enumerated ('System' on AB 2.9).
 REPOSITORY_NAME = "{REPOSITORY_NAME}"
+
+# install_library_to_repository -- 2.0.0
+#
+# Until 1.0.0 this passed overwrite=True and was documented as "overwrites
+# the same version": it silently replaced an installed name+version with
+# different content. The versioning rule (SemVer 2.0.0, global CLAUDE.md)
+# forbids exactly that: a library is installed already Released, and every
+# installed build has its own number -- a defect found later is the next
+# PATCH. Now:
+#   * not Released                       -> ERR_LIB_NOT_RELEASED, nothing done;
+#   * version not MAJOR.MINOR.PATCH      -> ERR_BAD_INPUT;
+#   * same number installed, same bytes  -> success, nothing to do;
+#   * same number installed, other bytes -> ERR_LIB_EXISTS, nothing done;
+#   * otherwise install with overwrite=False, then read it back.
+# The library's identity comes from its Project Information, read through
+# library_identity() -- an already-open project is used as is, otherwise the
+# file is opened as a SECONDARY project, so the user's primary project is
+# never switched. Live AB 2.9 facts: see "library releases" in _text_utils.
 
 try:
     print("DEBUG: install_library_to_repository: Project='%s' Repository='%s'" % (
         PROJECT_FILE_PATH, REPOSITORY_NAME))
-
-    if not PROJECT_FILE_PATH.lower().endswith('.library'):
-        print("WARN: Project path does not end with .library. The repository may reject the install.")
-
-    # The install reads the library FILE (install_library(path, repo, ...)), so
-    # the project only needs to be open to flush unsaved edits into that file.
-    # Live-verified 2026-10-17 (AB 2.9 SP19): install_library() works both with
-    # the library open and with it closed.
-    #
-    # The old script always opened the project (closing whatever the user had
-    # as primary) and always saved it. A Released library opens READ-ONLY and
-    # save() raises "opened in read-only mode" even with nothing to save, so
-    # every released library (MProtocol 1.0.0, LogiQ 0.0.2) failed to install
-    # and had to go through Tools > Library Repository > Install.
-    #   * library is the primary project -> save only if dirty;
-    #   * otherwise -> install straight from the file, nothing is opened.
-    target_norm = os.path.normcase(os.path.abspath(clean_path(PROJECT_FILE_PATH)))
-    if not os.path.exists(clean_path(PROJECT_FILE_PATH)):
+    lib_path = clean_path(PROJECT_FILE_PATH)
+    if not os.path.exists(lib_path):
         print("SCRIPT_ERROR_CODE: ERR_PROJECT_NOT_FOUND")
         raise RuntimeError("Library file not found: %s" % PROJECT_FILE_PATH)
-    primary_project = None
-    try:
-        cur = script_engine.projects.primary
-        if cur is not None and os.path.normcase(os.path.abspath(cur.path)) == target_norm:
-            primary_project = cur
-    except Exception as prim_err:
-        print("DEBUG: could not read the primary project: %s" % prim_err)
+    if not lib_path.lower().endswith('.library'):
+        print("WARN: path does not end with .library; the repository may reject it.")
 
-    save_action = 'not open: installed from the file as saved on disk'
-    if primary_project is not None:
-        dirty = True
-        try:
-            dirty = bool(primary_project.dirty)
-        except Exception:
-            pass
-        if not dirty:
-            save_action = 'open, no unsaved changes: save skipped'
-        else:
-            # Unsaved edits must reach the file or the install would publish
-            # the old content. On a read-only (Released) library this raises
-            # ERR_PROJECT_READ_ONLY with the fix in the message.
-            save_project_checked(primary_project, "the library before installing it")
-            save_action = 'open with unsaved changes: saved before install'
-    print("DEBUG: %s" % save_action)
-    released = project_is_released(primary_project) if primary_project is not None else None
-    # Argument variants for the legacy install entry points below: the file
-    # path always, the project object only when it is actually open.
-    _install_arg_variants = [(PROJECT_FILE_PATH,)]
-    if primary_project is not None:
-        _install_arg_variants.append((primary_project,))
+    ident = library_identity(lib_path)
+    display = ident['display']
+    print("DEBUG: identity: %s (Released=%s, open as primary=%s, dirty=%s)" % (
+        display, ident['released'], ident['primary'], ident['dirty']))
 
-    # --- Locate the library manager ---
-    lib_mgr = None
-    lib_mgr_source = None
-    for attr in ('librarymanager', 'library_manager'):
-        if hasattr(script_engine, attr):
-            try:
-                cand = getattr(script_engine, attr)
-                if cand is not None:
-                    lib_mgr = cand
-                    lib_mgr_source = "script_engine.%s" % attr
-                    break
-            except Exception:
-                pass
-
-    if lib_mgr is None:
-        print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
+    if not ident['released']:
+        print("SCRIPT_ERROR_CODE: ERR_LIB_NOT_RELEASED")
         raise RuntimeError(
-            "Could not locate library manager on script_engine (tried "
-            "librarymanager and library_manager). The CODESYS Scripting API "
-            "on this AB build may not expose library repository operations."
-        )
-    print("DEBUG: Library manager: %s" % lib_mgr_source)
+            "'%s' is not marked Released, so it was NOT installed. A library is "
+            "installed already Released, with a number of its own. Mark the final "
+            "version Released first -- set_project_info(released=true) -- or let "
+            "release_library_version do the whole sequence." % display)
+    if not is_semver_core(ident['version']):
+        print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
+        raise RuntimeError(
+            "'%s': version '%s' is not MAJOR.MINOR.PATCH (three numbers, no leading "
+            "zeros; a fourth number is a defect). Fix it with set_project_info first."
+            % (display, ident['version']))
 
-    # --- Diagnostic: probe all callable accessors on the library manager ---
-    # Empirical 2026-05-26 on AB 2.9 Standard against NexoMqttLib.library:
-    # script_engine.librarymanager.repositories enumerated only the read-only
-    # "System" repository, and the repo object did NOT expose install() or
-    # install_library() at all (Last error: None when both were tried).
-    # So we now try the MANAGER-level install_library() first (which selects
-    # the default writable repository internally) and only fall back to
-    # iterating .repositories if that path is missing.
-    mgr_probe_names = (
-        'install_library', 'install', 'add_library', 'import_library',
-        'install_project_as_library', 'save_as_library',
-        'repositories', 'user_repository', 'default_repository',
-        'find_repository',
-    )
-    mgr_present = [n for n in mgr_probe_names if hasattr(lib_mgr, n)]
-    print("DEBUG: lib_mgr methods/attrs present (via hasattr probe): %s" % mgr_present)
+    # Flush unsaved edits so the file is what gets checked and installed. A
+    # library released in this session still saves; one OPENED Released is
+    # read-only and gets ERR_PROJECT_READ_ONLY -- its edits could not be
+    # installed anyway.
+    if ident['primary'] and ident['dirty'] and ident['project'] is not None:
+        save_project_checked(ident['project'], "the library before installing it")
+        print("DEBUG: unsaved changes saved before install")
 
-    install_log = []
-    new_lib = None
+    lib_mgr = repository_library_manager()
+    if lib_mgr is None or not hasattr(lib_mgr, 'install_library'):
+        print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
+        raise RuntimeError("The library manager (script_engine.librarymanager.install_library) is not exposed on this build.")
 
-    # --- Pre-scan repositories so we have a repo object handy for the
-    # 2-arg lib_mgr.install_library(path, repo) signature ---
-    # Empirical 2026-05-26 on AB 2.9 Standard: install_library(str) raised
-    #     TypeError: Value cannot be null. Parameter name: repo
-    # which proved the signature is install_library(file_path, repo). Only
-    # the "System" repo was enumerated -- but it's writable in AB so we use
-    # it as the install target when REPOSITORY_NAME is unspecified.
-    repos = None
-    if hasattr(lib_mgr, 'repositories'):
+    src_sha = file_sha256(lib_path)
+    hit = find_installed_library(lib_mgr, display)
+    if hit is not None:
+        inst_path = None
         try:
-            repos = lib_mgr.repositories
-            if callable(repos):
-                repos = repos()
-        except Exception as re:
-            install_log.append("lib_mgr.repositories access: %s" % re)
-            repos = None
+            inst_path = _to_unicode(lib_mgr.get_file_path(hit[0]))
+        except Exception as gp_err:
+            print("DEBUG: get_file_path failed: %s" % gp_err)
+        same = bool(inst_path) and os.path.exists(inst_path) and file_sha256(inst_path) == src_sha
+        if same:
+            emit_result({
+                u'library': display, u'installed': False, u'alreadyInstalled': True,
+                u'repository': _to_unicode(_ref_attr(hit[1], 'name')), u'installedPath': inst_path,
+                u'sha256': src_sha,
+            })
+            print("'%s' is already installed from this very build (identical file); nothing to do." % display)
+            print("SCRIPT_SUCCESS: Library already installed (same build).")
+            sys.exit(0)
+        print("SCRIPT_ERROR_CODE: ERR_LIB_EXISTS")
+        raise RuntimeError(
+            "'%s' is already installed with DIFFERENT content%s. A released version "
+            "never changes -- not even for the Released flag alone. Give this build "
+            "the next number (a fix is the next PATCH) and install that." % (
+                display, (" (%s)" % inst_path) if inst_path else ""))
 
-    repo_handles = []  # list of (name, repo_object)
-    if repos is not None:
-        try:
-            for repo in repos:
-                rname = None
-                for nattr in ('get_name', 'name'):
-                    if hasattr(repo, nattr):
-                        try:
-                            val = getattr(repo, nattr)
-                            rname = val() if callable(val) else val
-                        except Exception:
-                            pass
-                        break
-                repo_handles.append((str(rname) if rname is not None else '?', repo))
-        except TypeError as iter_err:
-            install_log.append("repos iteration failed: %s" % iter_err)
-
-    # Pick the target repo. If REPOSITORY_NAME specified, exact match.
-    # Otherwise prefer one named like 'user' / 'default'; fall back to the
-    # first repo enumerated (typically 'System' on AB 2.9).
+    # --- target repository ---
+    repo_handles = []
+    try:
+        for r in lib_mgr.repositories:
+            repo_handles.append((_to_unicode(_ref_attr(r, 'name') or u'?'), r))
+    except Exception as re_err:
+        print("DEBUG: repositories not enumerable: %s" % re_err)
     target_repo = None
     target_repo_name = None
     if REPOSITORY_NAME:
         for n, r in repo_handles:
             if n.strip().lower() == REPOSITORY_NAME.strip().lower():
-                target_repo = r
-                target_repo_name = n
+                target_repo, target_repo_name = r, n
                 break
         if target_repo is None:
-            install_log.append(
-                "repository '%s' not found among enumerated %s; falling back" %
-                (REPOSITORY_NAME, [h[0] for h in repo_handles])
-            )
+            print("SCRIPT_ERROR_CODE: ERR_BAD_INPUT")
+            raise RuntimeError("Repository '%s' not found; available: %s" % (
+                REPOSITORY_NAME, [h[0] for h in repo_handles]))
     if target_repo is None:
         for n, r in repo_handles:
             if n.strip().lower() in ('user', 'users', 'default', 'user repository', 'default repository'):
-                target_repo = r
-                target_repo_name = n
+                target_repo, target_repo_name = r, n
                 break
     if target_repo is None and repo_handles:
         target_repo_name, target_repo = repo_handles[0]
+    if target_repo is None:
+        print("SCRIPT_ERROR_CODE: ERR_API_NOT_EXPOSED")
+        raise RuntimeError("No library repository is reachable from the scripting API on this build.")
 
-    print("DEBUG: Repositories enumerated: %s" % [h[0] for h in repo_handles])
-    print("DEBUG: Target repository: '%s'" % target_repo_name)
+    # --- install, never overwriting ---
+    # install_library(String filepath, ILibRepository repository, Boolean
+    # overwrite) -- the .NET signature seen in a live stack trace. With
+    # overwrite=False AB itself refuses a number that is already there.
+    try:
+        new_lib = lib_mgr.install_library(lib_path, target_repo, False)
+    except Exception as ie:
+        if 'already exists' in _to_unicode(ie).lower():
+            print("SCRIPT_ERROR_CODE: ERR_LIB_EXISTS")
+            raise RuntimeError("'%s' is already installed (AB refused to overwrite it). "
+                               "Give this build the next number." % display)
+        raise
 
-    # --- Path A: manager.install_library(filepath, repository, overwrite) ---
-    # Empirical 2026-05-26 stack-trace from AB 2.9 SP19 confirmed the .NET
-    # signature is:
-    #   LibManager.install_library(String filepath, ILibRepository repository,
-    #                              Boolean overwrite)
-    # Default overwrite is False, which raises
-    #   System.IO.IOException: Library already exists
-    # when a same-name+version library is already installed -- exactly what
-    # we want to AVOID, since the whole point of this tool is to update the
-    # library after edits. We pass overwrite=True so re-install replaces the
-    # previous version (the UI menu 'File > Save Project and Install into
-    # Library Repository' does the same).
-    if hasattr(lib_mgr, 'install_library') and target_repo is not None:
-        # 3-arg signature (path, repo, overwrite=True) -- preferred.
+    # --- read it back ---
+    after = find_installed_library(lib_mgr, display)
+    inst_path = None
+    if after is not None:
         try:
-            new_lib = lib_mgr.install_library(PROJECT_FILE_PATH, target_repo, True)
-            install_log.append("install_library(path, repo='%s', overwrite=True): SUCCESS -> %s" % (target_repo_name, new_lib))
-        except Exception as e:
-            install_log.append("install_library(path, repo='%s', overwrite=True): %s: %s" % (target_repo_name, type(e).__name__, e))
-        # 2-arg fallback for builds that don't accept the overwrite arg.
-        if new_lib is None:
-            try:
-                new_lib = lib_mgr.install_library(PROJECT_FILE_PATH, target_repo)
-                install_log.append("install_library(path, repo='%s'): SUCCESS -> %s" % (target_repo_name, new_lib))
-            except Exception as e:
-                install_log.append("install_library(path, repo='%s'): %s: %s" % (target_repo_name, type(e).__name__, e))
-
-    # --- Path B: legacy single-arg install_library(path) (older builds) ---
-    if new_lib is None and hasattr(lib_mgr, 'install_library'):
-        for arg_tup in _install_arg_variants:
-            try:
-                new_lib = lib_mgr.install_library(*arg_tup)
-                install_log.append("install_library(%s): SUCCESS -> %s" % (type(arg_tup[0]).__name__, new_lib))
-                break
-            except Exception as e:
-                install_log.append("install_library(%s): %s: %s" % (type(arg_tup[0]).__name__, type(e).__name__, e))
-
-    # --- Path C: manager.install(path/project) -- alternative API name ---
-    if new_lib is None and hasattr(lib_mgr, 'install'):
-        for arg_tup in _install_arg_variants:
-            try:
-                new_lib = lib_mgr.install(*arg_tup)
-                install_log.append("install(%s): SUCCESS -> %s" % (type(arg_tup[0]).__name__, new_lib))
-                break
-            except Exception as e:
-                install_log.append("install(%s): %s: %s" % (type(arg_tup[0]).__name__, type(e).__name__, e))
-
-    # --- Path D: per-repository install (legacy / older API) ---
-    candidates_seen = []
-    if new_lib is None and repos is not None:
-        # Probe each repo for an install method (install_library / install / add).
-        repo_method_names = ('install_library', 'install', 'add_library', 'add', 'import_library', 'import')
-        try:
-            for repo in repos:
-                rname = None
-                for nattr in ('get_name', 'name'):
-                    if hasattr(repo, nattr):
-                        try:
-                            val = getattr(repo, nattr)
-                            rname = val() if callable(val) else val
-                        except Exception:
-                            pass
-                        break
-                rloc = None
-                for lattr in ('get_location', 'location', 'path'):
-                    if hasattr(repo, lattr):
-                        try:
-                            val = getattr(repo, lattr)
-                            rloc = val() if callable(val) else val
-                        except Exception:
-                            pass
-                        break
-                repo_methods = [m for m in repo_method_names if hasattr(repo, m)]
-                candidates_seen.append({
-                    'name': str(rname), 'location': str(rloc),
-                    'methods_present': repo_methods,
-                })
-
-                # Filter: caller may request a specific repo by name.
-                if REPOSITORY_NAME and rname and str(rname).strip().lower() != REPOSITORY_NAME.strip().lower():
-                    continue
-
-                # Try every install method on this repo, with both arg types.
-                for fn_name in repo_method_names:
-                    if not hasattr(repo, fn_name):
-                        continue
-                    fn = getattr(repo, fn_name)
-                    for arg_tup in _install_arg_variants:
-                        try:
-                            new_lib = fn(*arg_tup)
-                            install_log.append(
-                                "repo[%s].%s(%s): SUCCESS -> %s" %
-                                (rname, fn_name, type(arg_tup[0]).__name__, new_lib))
-                            break
-                        except Exception as e:
-                            install_log.append(
-                                "repo[%s].%s(%s): %s: %s" %
-                                (rname, fn_name, type(arg_tup[0]).__name__, type(e).__name__, e))
-                    if new_lib is not None:
-                        break
-                if new_lib is not None:
-                    break
-        except TypeError as iter_err:
-            install_log.append("repos iteration failed (not iterable): %s" % iter_err)
-
-    # Dump candidates_seen as DEBUG so we always know what was enumerated.
-    print("DEBUG: Repositories enumerated: %d" % len(candidates_seen))
-    for c in candidates_seen:
-        print("DEBUG:   - name='%s' location='%s' methods=%s" %
-              (c.get('name'), c.get('location'), c.get('methods_present')))
-
-    if new_lib is None:
-        # Last-resort diagnostic: list every attribute on lib_mgr via dir() AND
-        # via hasattr probe. dir() may miss COM-proxied members but include
-        # something not in our probe list.
-        try:
-            mgr_dir = [a for a in dir(lib_mgr) if not a.startswith('_')]
+            inst_path = _to_unicode(lib_mgr.get_file_path(after[0]))
         except Exception:
-            mgr_dir = ['<dir() failed>']
-        print("SCRIPT_ERROR_CODE: ERR_UNKNOWN")
+            inst_path = None
+    if after is None or not inst_path or not os.path.exists(inst_path) or file_sha256(inst_path) != src_sha:
+        installed_as = _to_unicode(_ref_attr(new_lib, 'displayname') or new_lib)
+        print("SCRIPT_ERROR_CODE: ERR_WRITE_DID_NOT_STICK")
         raise RuntimeError(
-            "Could not install library '%s'. Attempt log:\n  %s\n"
-            "Manager (%s) probed methods present: %s\n"
-            "Manager dir(): %s\n"
-            "Repositories enumerated: %s\n"
-            "If your edition is AB 2.9 Standard, the writable User repository "
-            "may not be reachable from the scripting API. Workaround: install "
-            "the library manually via AB UI menu 'File > Save Project and "
-            "Install into Library Repository' for now, and forward the dir() "
-            "list above so the right entry point can be wired." %
-            (PROJECT_FILE_PATH, "\n  ".join(install_log), lib_mgr_source,
-             mgr_present, mgr_dir, candidates_seen)
-        )
+            "install_library returned %s, but '%s' is not in the repository with this "
+            "file's content (found: %s)." % (installed_as, display, inst_path))
 
-    # Best-effort name + location of the installed library.
-    new_lib_name = None
-    new_lib_loc = None
-    for attr in ('get_name', 'name'):
-        if hasattr(new_lib, attr):
-            try:
-                val = getattr(new_lib, attr)
-                new_lib_name = val() if callable(val) else val
-            except Exception:
-                pass
-            break
-    for attr in ('location', 'path'):
-        if hasattr(new_lib, attr):
-            try:
-                new_lib_loc = getattr(new_lib, attr)
-            except Exception:
-                pass
-            break
-
-    print("Library installed: %s (path=%s, location=%s)" % (PROJECT_FILE_PATH, new_lib_name, new_lib_loc))
-    print("Save step: %s%s" % (save_action, " (library is Released)" if released else ""))
-    print("Attempt log:")
-    for line in install_log:
-        print("  %s" % line)
+    emit_result({
+        u'library': display, u'installed': True, u'alreadyInstalled': False,
+        u'repository': _to_unicode(target_repo_name), u'installedPath': inst_path,
+        u'sha256': src_sha,
+    })
+    print("Library installed: %s -> %s (repository %s), verified byte for byte." % (
+        display, inst_path, target_repo_name))
     print("SCRIPT_SUCCESS: Library installed to repository.")
     sys.exit(0)
 except Exception as e:

@@ -47,8 +47,10 @@ export enum MCPErrorCode {
   // ─── Library ──────────────────────────────────────────────────────
   /** Library is not installed in any repository. */
   ERR_LIB_NOT_FOUND = 'ERR_LIB_NOT_FOUND',
-  /** Same name+version is already installed (re-install without overwrite). */
+  /** That name+version is already installed with different content. A released version never changes: bump it (2.0.0). */
   ERR_LIB_EXISTS = 'ERR_LIB_EXISTS',
+  /** The library is not marked Released; a library is installed already Released (2.0.0). */
+  ERR_LIB_NOT_RELEASED = 'ERR_LIB_NOT_RELEASED',
   /** Library parameter name not exposed by the referenced library. */
   ERR_LIB_PARAM_NOT_FOUND = 'ERR_LIB_PARAM_NOT_FOUND',
 

@@ -126,7 +126,7 @@ The `add_device.py`, `set_device_parameter.py`, `list_device_repository.py`, `cr
 # Static checks (ASCII, template-reference resolution, orphan scripts)
 pwsh dev/check-scripts.ps1
 
-# All tests, from source -- 139 currently (the fake-engine suite needs a CPython 2.7, AB ships one)
+# All tests, from source -- 149 currently (the fake-engine suite needs a CPython 2.7, AB ships one)
 npm test
 
 # Type check only

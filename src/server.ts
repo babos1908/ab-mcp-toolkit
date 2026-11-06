@@ -16,9 +16,10 @@ import { ExecutorProxy, ResilientExecutor } from './executor-proxy';
 import { BackupManager } from './backup-manager';
 import { diffLibraryFiles } from './library-diff';
 import { parseProjectOffline, searchProjectOffline } from './offline-reader';
-import { parseResultJson } from './result-parser';
+import { parseResultJson, extractErrorCode } from './result-parser';
 import { readOnlyHint } from './response-hints';
 import { BuildInfo, readBuildInfo, restartNeeded } from './build-info';
+import { releaseLibraryVersion } from './library-release';
 import {
   CompileMessage,
   CacheFileReport,
@@ -39,24 +40,6 @@ function resolvePath(filePath: string, workspaceDir: string): string {
 /** Sanitize a POU path (forward slashes, no leading/trailing slashes) */
 function sanitizePouPath(pouPath: string): string {
   return pouPath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
-}
-
-/**
- * Pluck an MCPErrorCode marker from a script's stdout if present. Scripts
- * emit lines of the form
- *     SCRIPT_ERROR_CODE: ERR_<X>
- * to surface a structured error code in addition to the human-readable
- * SCRIPT_ERROR line. Returns null when no marker is present (uncoded error).
- */
-function extractErrorCode(output: string): string | null {
-  const marker = 'SCRIPT_ERROR_CODE:';
-  const idx = output.lastIndexOf(marker);
-  if (idx === -1) return null;
-  // Take the rest of that line (until \n or end) and trim.
-  const rest = output.slice(idx + marker.length);
-  const nl = rest.indexOf('\n');
-  const code = (nl === -1 ? rest : rest.slice(0, nl)).trim();
-  return code || null;
 }
 
 /** Format an IpcResult into an MCP tool response */
@@ -145,6 +128,7 @@ async function fileExists(filePath: string): Promise<boolean> {
  * roughly chronological. Each entry maps a short stable ID to a description.
  */
 const MCP_PATCHES: Array<{ id: string; description: string }> = [
+  { id: 'library-install-released-no-overwrite', description: '2.0.0 (MAJOR). Versioning rule: a library is installed already Released and every installed build has its own MAJOR.MINOR.PATCH number. install_library_to_repository no longer overwrites (it was documented "overwrites the same version" and passed overwrite=True): same build already installed = no-op; same number, different content = ERR_LIB_EXISTS; not Released = ERR_LIB_NOT_RELEASED (new code); bad version = ERR_BAD_INPUT; otherwise install with overwrite=False and read back byte for byte. Identity is read from Project Information by opening the library as a SECONDARY project (primary untouched). release_library_version: precheck (format + not installed) before touching the library, then set version clearing Released, rebuild, mark Released, install. Live facts (headless AB 2.9 SP19, throw-away library): identity = "Title, version (Company)"; secondary open changes no byte; overwrite=False refuses a taken number; the installed file is a byte-for-byte copy.' },
   { id: 'session-ownership-and-safe-cleanup', description: 'Shared-machine incident 2026-10-18: at 18:40:50 the IPC dirs of TWO live AB sessions were deleted from under their watchers (MPLUS IO PID 26312 and PID 13804); every call then failed with ENOENT on commands/<id>.py.tmp, diagnose_mcp_state said "Healthy" with "Heartbeat: never", and the 13804 watcher logged the same error ~16 times a second (8 MB in 40 min). The culprit process could not be attributed (no --log-file configured), but two defects made it possible for one server to break another\'s session: (1) adoptExisting() without a projectFilePath adopted the newest live session whoever was driving it; (2) shutdown() and forceReset() always rm -rf\'d the IPC dir, even when the watcher was alive (kill skipped or failed). Fixes: an owner.json marker per session ({serverPid} while a server drives it, {serverPid:null} after a keep-alive detach); adoption never takes a session owned by another live server (not even probed), and without a project adopts only a released/orphaned session or, for sessions from older servers, an idle one; launch_codesys reports the live sessions it passed over; list_ab_sessions shows ownedBy. The IPC dir is deleted only when its watcher is gone (AB pid exited, or heartbeat missing/older than 30s when the pid is unknown). Self-healing: IpcClient recreates commands/ and results/ before sending, and the watcher (newly launched ones) recreates them instead of failing every 50ms, logging a repeating error once per ~1000 repeats. diagnose_mcp_state reports the folder MISSING and says not to force_reset for it. sessionBaseDir makes the session folder configurable so tests never touch the real one. 12 unit tests; removing the four guards fails exactly the six that test them.' },
   { id: 'iec-time-parser-shared-and-strict', description: 'set_task_parameter and get_task_configuration each carried a copy of the IEC TIME literal parser (AC500 V3 task interval and watchdog time are such strings); both now use _text_utils.iec_time_literal_to_ms / time_value_to_ms. Differential check on AB Python 2.7, 37 inputs: old copies identical to each other everywhere, the shared parser identical to them on 35. The other 2 expose a latent bug the copies shared: only the LAST component had to end the literal, so t#1msGARBAGE5s parsed as 5001 ms -- now components must cover the literal back to back, which matters most for set_task_parameter read-back (a misparse could verify a write that did not happen). Live 2026-10-18 on a copy: read 10/20 ms, wrote and read back 50/100 ms, re-read from a fresh process.' },
   { id: 'reference-version-redirect-or-readd', description: 'set_library_reference_version found no reference on AB 2.9 (it walked lm.get_children(), empty there), then tried set_version() / version=, which do not exist, and reported success even when the save failed. Rewritten on the mechanisms probed live (2026-10-18, temp copy of an AC500 V3 project): a PLACEHOLDER reference\'s version is the project-level redirection -- ref.set_redirection("Title, version (Company)") moves effective_resolution at once and persists; a MANAGED reference\'s managed_library is read-only, so remove_library + add_library at the new version, restoring namespace / qualified_only / optional and re-applying parameter overrides with a read-back. "*" floats to the newest installed version for both. TRAP found by probing: AB ACCEPTS a redirection to a version that is not installed and leaves the reference unresolved (effective_resolution None), so the target is checked with find_library before anything is written (ERR_LIB_NOT_FOUND listing the installed versions). Every change is read back before save_project_checked; one that does not take is rolled back in memory and not saved. System references refused. Live-verified through the real script: #MProtocol 1.0.0 -> 0.1.4; 9.9.9 refused with nothing written; AC500-V3-utilities-ip 1.0.2 -> 1.0.1 with namespace UtilsIP / qualified_only restored; then -> "*" resolving to 1.0.2; a fresh AB process re-read both from disk.' },
@@ -1301,134 +1285,37 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   s.tool(
     'release_library_version',
-    "Orchestrate a library release in a single tool call: (1) set_project_info with the new version, (2) rebuild_library, (3) install_library_to_repository, (4) copy the .library file to distFolder/v{version}/{name}-v{version}.library, and optionally (5) `git tag` + `gh release create` against the repo. Each step is conditional and failures surface step-by-step in the returned JSON. Safer than scripting these calls manually because the steps run in the right order with shared error context.",
+    "Release a library in one call, following SemVer 2.0.0: (1) refuse a version that is not MAJOR.MINOR.PATCH or is already installed -- before touching anything; (2) set the version, clearing Released for the edit; (3) rebuild_library; (4) mark Released; (5) install_library_to_repository, which reads the install back; optionally (6) copy to distFolder/v{version}/{name}-v{version}.library, git tag v{version}, gh release. A library is installed already Released, and a taken number is never overwritten: a fix is the next PATCH. Every step is reported in the returned JSON.",
     {
       libraryProjectFilePath: z.string().describe("Path to the .library project file to release."),
-      version: z.string().min(1).describe("New version string (e.g. '1.0.11'). Format: MAJOR.MINOR.PATCH[.BUILD]."),
+      version: z.string().min(1).describe("New version, MAJOR.MINOR.PATCH only (e.g. '1.0.11'): AB's Version field takes numbers only, and a fourth number is a defect. Must not be installed yet."),
       distFolder: z.string().describe("Optional path to a dist folder. The .library file is copied to {distFolder}/v{version}/{name}-v{version}.library after install.").optional(),
       gitTag: z.boolean().describe("If true, run 'git tag v{version}' in the library's repo directory after install. Off by default.").optional(),
       ghRelease: z.boolean().describe("If true and gitTag is also true, run 'gh release create v{version} --generate-notes' after the tag. Off by default.").optional(),
     },
     async (args: { libraryProjectFilePath: string; version: string; distFolder?: string; gitTag?: boolean; ghRelease?: boolean }) => {
-      const steps: Array<{ name: string; ok: boolean; detail: string }> = [];
-      const recordStep = (name: string, ok: boolean, detail: string): void => {
-        steps.push({ name, ok, detail });
-      };
-
-      const libPath = resolvePath(args.libraryProjectFilePath, workspaceDir);
-
-      // STEP 1: set_project_info(version)
-      try {
-        const script = scriptManager.prepareScriptWithHelpers(
-          'set_project_info',
-          { PROJECT_FILE_PATH: libPath, VERSION: args.version, TITLE: '', AUTHOR: '', COMPANY: '', DESCRIPTION: '' },
-          ['_text_utils', 'ensure_project_open']
-        );
-        await backupManager.snapshot(libPath);
-        const r = await executor.executeScript(script);
-        const ok = r.success && r.output.includes('SCRIPT_SUCCESS');
-        recordStep('set_project_info', ok, ok ? `version set to ${args.version}` : r.output.slice(-500));
-        if (!ok) {
-          return {
-            content: [{ type: 'text' as const, text: JSON.stringify({ released: false, steps }, null, 2) }],
-            isError: true,
-          };
+      const result = await releaseLibraryVersion(
+        {
+          libPath: resolvePath(args.libraryProjectFilePath, workspaceDir),
+          version: args.version.trim(),
+          distFolder: args.distFolder ? resolvePath(args.distFolder, workspaceDir) : undefined,
+          gitTag: args.gitTag,
+          ghRelease: args.ghRelease,
+        },
+        {
+          executor,
+          prepare: (name, params, helpers) => scriptManager.prepareScriptWithHelpers(name, params, helpers),
+          snapshot: (filePath) => backupManager.snapshot(filePath),
+          run: (cmd, cwd, timeoutMs) => {
+            const { execSync } = require('child_process');
+            execSync(cmd, { cwd, timeout: timeoutMs, stdio: 'pipe' });
+          },
         }
-      } catch (err) {
-        recordStep('set_project_info', false, err instanceof Error ? err.message : String(err));
-        return {
-          content: [{ type: 'text' as const, text: JSON.stringify({ released: false, steps }, null, 2) }],
-          isError: true,
-        };
-      }
-
-      // STEP 2: rebuild_library
-      try {
-        const script = scriptManager.prepareScriptWithHelpers(
-          'rebuild_library',
-          { PROJECT_FILE_PATH: libPath, REGENERATE_ARTIFACTS: 'true' },
-          ['_text_utils', 'ensure_project_open']
-        );
-        const r = await executor.executeScript(script, 180_000);
-        const ok = r.success && r.output.includes('SCRIPT_SUCCESS');
-        recordStep('rebuild_library', ok, ok ? 'rebuild done' : r.output.slice(-500));
-        if (!ok) {
-          return {
-            content: [{ type: 'text' as const, text: JSON.stringify({ released: false, steps }, null, 2) }],
-            isError: true,
-          };
-        }
-      } catch (err) {
-        recordStep('rebuild_library', false, err instanceof Error ? err.message : String(err));
-      }
-
-      // STEP 3: install_library_to_repository
-      try {
-        const script = scriptManager.prepareScriptWithHelpers(
-          'install_library_to_repository',
-          { PROJECT_FILE_PATH: libPath, REPOSITORY_NAME: '' },
-          ['_text_utils', 'ensure_project_open']
-        );
-        const r = await executor.executeScript(script);
-        const ok = r.success && r.output.includes('SCRIPT_SUCCESS');
-        recordStep('install_library_to_repository', ok, ok ? 'installed' : r.output.slice(-500));
-        if (!ok) {
-          return {
-            content: [{ type: 'text' as const, text: JSON.stringify({ released: false, steps }, null, 2) }],
-            isError: true,
-          };
-        }
-      } catch (err) {
-        recordStep('install_library_to_repository', false, err instanceof Error ? err.message : String(err));
-        return {
-          content: [{ type: 'text' as const, text: JSON.stringify({ released: false, steps }, null, 2) }],
-          isError: true,
-        };
-      }
-
-      // STEP 4: copy to distFolder
-      if (args.distFolder) {
-        try {
-          const distDir = resolvePath(args.distFolder, workspaceDir);
-          const baseName = path.basename(libPath, path.extname(libPath));
-          const targetDir = path.join(distDir, `v${args.version}`);
-          fs.mkdirSync(targetDir, { recursive: true });
-          const targetFile = path.join(targetDir, `${baseName}-v${args.version}.library`);
-          fs.copyFileSync(libPath, targetFile);
-          recordStep('copy_to_dist', true, `copied to ${targetFile}`);
-        } catch (err) {
-          recordStep('copy_to_dist', false, err instanceof Error ? err.message : String(err));
-        }
-      }
-
-      // STEP 5: git tag + gh release (optional)
-      if (args.gitTag) {
-        try {
-          const { execSync } = require('child_process');
-          const repoDir = path.dirname(libPath);
-          execSync(`git tag v${args.version}`, { cwd: repoDir, timeout: 10_000, stdio: 'pipe' });
-          recordStep('git_tag', true, `tagged v${args.version}`);
-          if (args.ghRelease) {
-            try {
-              execSync(`gh release create v${args.version} --generate-notes`, {
-                cwd: repoDir,
-                timeout: 30_000,
-                stdio: 'pipe',
-              });
-              recordStep('gh_release', true, `release v${args.version} created`);
-            } catch (gerr) {
-              recordStep('gh_release', false, gerr instanceof Error ? gerr.message : String(gerr));
-            }
-          }
-        } catch (err) {
-          recordStep('git_tag', false, err instanceof Error ? err.message : String(err));
-        }
-      }
-
-      const released = steps.every((s) => s.ok);
+      );
+      const prefix = result.errorCode ? `[${result.errorCode}] ` : '';
       return {
-        content: [{ type: 'text' as const, text: JSON.stringify({ released, version: args.version, steps }, null, 2) }],
-        isError: !released,
+        content: [{ type: 'text' as const, text: prefix + JSON.stringify(result, null, 2) }],
+        isError: !result.released,
       };
     }
   );
@@ -3081,7 +2968,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   s.tool(
     'install_library_to_repository',
-    "Installs a .library file into the Library Repository (overwrites the same version). Saves first only if it is the open project with unsaved edits; Released libraries work.",
+    "Installs a Released .library into the Library Repository, never overwriting: the same build already installed is a no-op, the same name+version with different content is ERR_LIB_EXISTS (a fix is the next PATCH), a library not marked Released is ERR_LIB_NOT_RELEASED, a version that is not MAJOR.MINOR.PATCH is ERR_BAD_INPUT. The install is read back byte for byte. The user's primary project is not switched.",
     {
       libraryProjectFilePath: z.string().describe("Path to the .library file to install. If it is not the open project it is installed straight from disk without opening it (the user's open project is not switched). If it is open: saved only when dirty -- a Released library opens read-only, so it is installed as saved."),
       repositoryName: z.string().describe("Optional name of the target repository (e.g. 'User', 'Default'). If omitted, the script picks the User repository if available, otherwise the first repository.").optional(),
